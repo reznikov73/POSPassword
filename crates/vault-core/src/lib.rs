@@ -14,11 +14,13 @@
 mod crypto;
 mod error;
 mod generator;
+mod import;
 mod model;
 mod vault;
 
-pub use crypto::{KdfParams, KEY_LEN, NONCE_LEN, SALT_LEN};
+pub use crypto::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 pub use error::{Error, Result};
-pub use generator::{generate_password, GeneratorOptions};
-pub use model::{Item, ItemKind, VaultData};
-pub use vault::{Vault, FORMAT_VERSION, MAGIC};
+pub use generator::{GeneratorOptions, generate_password};
+pub use import::{ImportFormat, ImportSummary, import_file};
+pub use model::{Field, Item, ItemKind, VaultData};
+pub use vault::{FORMAT_VERSION, MAGIC, Vault};

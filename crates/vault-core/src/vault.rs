@@ -181,6 +181,23 @@ impl Vault {
         Ok(id)
     }
 
+    /// Добавляет несколько записей и сохраняет файл один раз.
+    /// Нужно для импорта: сотни записей — одна запись на диск.
+    pub fn add_many(&mut self, items: Vec<Item>) -> Result<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let count = items.len();
+        let now = now_secs();
+        for mut item in items {
+            item.created_at = now;
+            item.updated_at = now;
+            self.data.items.push(item);
+        }
+        self.save()?;
+        Ok(count)
+    }
+
     /// Заменяет запись с тем же id, сохраняя дату создания.
     pub fn update(&mut self, mut item: Item) -> Result<()> {
         let existing = self
@@ -248,7 +265,8 @@ impl std::fmt::Debug for Vault {
     }
 }
 
-fn validate_master_password(password: &str) -> Result<()> {    if password.chars().count() < MIN_PASSWORD_LEN {
+fn validate_master_password(password: &str) -> Result<()> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(Error::InvalidFormat(format!(
             "мастер-пароль должен быть не короче {MIN_PASSWORD_LEN} символов"
         )));

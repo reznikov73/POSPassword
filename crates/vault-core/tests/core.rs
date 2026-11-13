@@ -24,8 +24,12 @@ fn roundtrip_create_add_reopen() {
 
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
     assert!(vault.items().is_empty());
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
-    vault.add(login("Почта", "user@example.com", "пароль")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
+    vault
+        .add(login("Почта", "user@example.com", "пароль"))
+        .expect("add");
     drop(vault);
 
     let reopened = Vault::open(&path, PASSWORD).expect("открытие");
@@ -44,7 +48,9 @@ fn roundtrip_create_add_reopen() {
 fn wrong_password_is_rejected() {
     let (_dir, path) = temp_vault_path();
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     drop(vault);
 
     let err = Vault::open(&path, "wrong password here").expect_err("должна быть ошибка");
@@ -55,7 +61,9 @@ fn wrong_password_is_rejected() {
 fn tampered_ciphertext_is_rejected() {
     let (_dir, path) = temp_vault_path();
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     drop(vault);
 
     let mut bytes = fs::read(&path).expect("чтение");
@@ -71,7 +79,9 @@ fn tampered_ciphertext_is_rejected() {
 fn tampered_header_is_rejected() {
     let (_dir, path) = temp_vault_path();
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     drop(vault);
 
     // Байты 11..15 — m_cost. Меняем на меньшее значение: заголовок входит в AAD.
@@ -80,18 +90,26 @@ fn tampered_header_is_rejected() {
     fs::write(&path, &bytes).expect("запись");
 
     let result = Vault::open(&path, PASSWORD);
-    assert!(result.is_err(), "подмена параметров KDF должна ломать открытие");
+    assert!(
+        result.is_err(),
+        "подмена параметров KDF должна ломать открытие"
+    );
 }
 
 #[test]
 fn change_password_rotates_key() {
     let (_dir, path) = temp_vault_path();
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     vault.change_password("новый мастер пароль").expect("смена");
     drop(vault);
 
-    assert!(Vault::open(&path, PASSWORD).is_err(), "старый пароль не должен работать");
+    assert!(
+        Vault::open(&path, PASSWORD).is_err(),
+        "старый пароль не должен работать"
+    );
     let reopened = Vault::open(&path, "новый мастер пароль").expect("новый пароль");
     assert_eq!(reopened.items().len(), 1);
 }
@@ -125,7 +143,7 @@ fn search_matches_title_user_url_and_notes() {
     assert_eq!(vault.search("OCTOCAT").len(), 1);
     assert_eq!(vault.search("example.com").len(), 2, "url учитывается");
     assert_eq!(vault.search("рабочий").len(), 1, "заметки учитываются");
-    assert_eq!(vault.search("" ).len(), 2, "пустой запрос — все записи");
+    assert_eq!(vault.search("").len(), 2, "пустой запрос — все записи");
     assert_eq!(
         vault.search("pin").len(),
         0,
@@ -137,7 +155,9 @@ fn search_matches_title_user_url_and_notes() {
 fn password_is_not_searchable() {
     let (_dir, path) = temp_vault_path();
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
-    vault.add(login("GitHub", "octocat", "уникальныйсекрет")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "уникальныйсекрет"))
+        .expect("add");
     assert!(vault.search("уникальныйсекрет").is_empty());
 }
 
@@ -200,7 +220,9 @@ fn unicode_master_password_works() {
     let (_dir, path) = temp_vault_path();
     let password = "Мастер-пароль-с-кириллицей";
     let mut vault = Vault::create(&path, password).expect("создание");
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     drop(vault);
 
     Vault::open(&path, password).expect("открытие с юникодом");
@@ -226,10 +248,15 @@ fn each_save_uses_fresh_nonce() {
     let mut vault = Vault::create(&path, PASSWORD).expect("создание");
     let first = fs::read(&path).unwrap();
 
-    vault.add(login("GitHub", "octocat", "s3cret")).expect("add");
+    vault
+        .add(login("GitHub", "octocat", "s3cret"))
+        .expect("add");
     let second = fs::read(&path).unwrap();
 
     // nonce лежит после magic+version+kdf_id+m,t,p+salt
     let nonce_start = 8 + 2 + 1 + 12 + 16;
-    assert_ne!(&first[nonce_start..nonce_start + 24], &second[nonce_start..nonce_start + 24]);
+    assert_ne!(
+        &first[nonce_start..nonce_start + 24],
+        &second[nonce_start..nonce_start + 24]
+    );
 }

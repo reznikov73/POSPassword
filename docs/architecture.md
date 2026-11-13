@@ -54,10 +54,13 @@
 
 ```rust
 Item {
-  id: Uuid, kind: Login | SecureNote,
+  id: Uuid, kind: Login | SecureNote | Card | BankAccount,
   title, username, password, url, notes: String,
-  tags: Vec<String>, created_at: i64, updated_at: i64,
+  tags: Vec<String>, fields: Vec<Field>,
+  created_at: i64, updated_at: i64,
 }
+
+Field { label: String, value: String, sensitive: bool }
 ```
 
 - `password` и `notes` зануляются в `Drop`, чтобы не оставаться в куче после закрытия записи.

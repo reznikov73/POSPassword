@@ -6,7 +6,10 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use vault_core::{Error, GeneratorOptions, Item, ItemKind, Result, Vault, generate_password};
+use vault_core::{
+    Error, GeneratorOptions, ImportFormat, Item, ItemKind, Result, Vault, generate_password,
+    import_file,
+};
 
 const HELP: &str = "\
 Хранитель — локальное хранилище паролей
@@ -17,6 +20,8 @@ const HELP: &str = "\
   vault-cli show <файл> <запрос> --reveal
   vault-cli add <файл> [--generate] [--length N]
   vault-cli passwd <файл>               сменить мастер-пароль
+  vault-cli import <файл> <экспорт>     импорт из Bitwarden или 1Password
+        [--format auto|bitwarden-json|bitwarden-csv|1password-csv|csv]
   vault-cli gen [--length N]            сгенерировать пароль
   vault-cli help
 
@@ -51,6 +56,7 @@ fn run() -> Result<()> {
         "show" => show(rest),
         "add" => add(rest),
         "passwd" => passwd(rest),
+        "import" => import_cmd(rest),
         "gen" => generate_cmd(rest),
         other => {
             println!("Неизвестная команда: {other}\n\n{HELP}");
@@ -68,10 +74,7 @@ fn init(args: &[String]) -> Result<()> {
     }
 
     let vault = Vault::create(&path, &password)?;
-    println!(
-        "Хранилище создано: {}",
-        vault.path().display()
-    );
+    println!("Хранилище создано: {}", vault.path().display());
     Ok(())
 }
 
@@ -86,7 +89,7 @@ fn list(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<32} {:<24} {}", "Название", "Логин", "Сайт");
+    println!("{:<32} {:<24} Сайт", "Название", "Логин");
     println!("{}", "-".repeat(80));
     for item in items {
         println!(
@@ -128,6 +131,17 @@ fn show(args: &[String]) -> Result<()> {
     }
     if !item.url.is_empty() {
         println!("Сайт:     {}", item.url);
+    }
+    for field in &item.fields {
+        if field.value.is_empty() {
+            continue;
+        }
+        let shown = if field.sensitive && !reveal {
+            "•••••• (--reveal чтобы показать)".to_string()
+        } else {
+            field.value.clone()
+        };
+        println!("{:<9} {}", format!("{}:", field.label), shown);
     }
     if !item.notes.is_empty() {
         println!("Заметки:  {}", item.notes);
@@ -188,6 +202,46 @@ fn passwd(args: &[String]) -> Result<()> {
     vault.change_password(&password)?;
     println!("Мастер-пароль изменён.");
     Ok(())
+}
+
+fn import_cmd(args: &[String]) -> Result<()> {
+    let path = require_path(args)?;
+    let file = args
+        .get(1)
+        .ok_or_else(|| Error::InvalidFormat("укажите файл экспорта".into()))?;
+
+    let format = parse_import_format(args)?;
+    let mut vault = open_vault(&path)?;
+    let summary = import_file(&mut vault, file, format)?;
+
+    println!("Добавлено записей: {}", summary.added);
+    if summary.duplicates > 0 {
+        println!("Пропущено дубликатов: {}", summary.duplicates);
+    }
+    if summary.unsupported > 0 {
+        println!("Не поддержано записей: {}", summary.unsupported);
+    }
+    for warning in &summary.warnings {
+        println!("Замечание: {warning}");
+    }
+    Ok(())
+}
+
+fn parse_import_format(args: &[String]) -> Result<ImportFormat> {
+    let Some(pos) = args.iter().position(|a| a == "--format") else {
+        return Ok(ImportFormat::Auto);
+    };
+    let value = args
+        .get(pos + 1)
+        .ok_or_else(|| Error::InvalidFormat("--format требует значения".into()))?;
+    Ok(match value.as_str() {
+        "auto" => ImportFormat::Auto,
+        "bitwarden-json" => ImportFormat::BitwardenJson,
+        "bitwarden-csv" => ImportFormat::BitwardenCsv,
+        "1password-csv" => ImportFormat::OnePasswordCsv,
+        "csv" => ImportFormat::GenericCsv,
+        other => return Err(Error::InvalidFormat(format!("неизвестный формат: {other}"))),
+    })
 }
 
 fn generate_cmd(args: &[String]) -> Result<()> {

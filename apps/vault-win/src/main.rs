@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use uuid::Uuid;
-use vault_core::{generate_password, GeneratorOptions, Item, ItemKind, Vault};
+use vault_core::{
+    Field, GeneratorOptions, ImportFormat, Item, ItemKind, Vault, generate_password, import_file,
+};
 use zeroize::Zeroize;
 
 const APP_TITLE: &str = "Хранитель";
@@ -45,19 +47,25 @@ struct Draft {
     password: String,
     url: String,
     notes: String,
+    fields: Vec<Field>,
     show_plain: bool,
 }
 
 impl Draft {
     fn new_item() -> Self {
+        Self::from_kind(ItemKind::Login)
+    }
+
+    fn from_kind(kind: ItemKind) -> Self {
         Self {
             id: None,
-            kind: ItemKind::Login,
+            kind,
             title: String::new(),
             username: String::new(),
             password: String::new(),
             url: String::new(),
             notes: String::new(),
+            fields: template_fields(kind),
             show_plain: true,
         }
     }
@@ -71,12 +79,17 @@ impl Draft {
             password: item.password.clone(),
             url: item.url.clone(),
             notes: item.notes.clone(),
+            fields: item.fields.clone(),
             show_plain: false,
         }
     }
 
     fn build(&self) -> Item {
-        let mut item = Item::new(self.kind, self.title.trim());
+        let mut item = match self.kind {
+            ItemKind::Card => Item::new_card(self.title.trim()),
+            ItemKind::BankAccount => Item::new_bank_account(self.title.trim()),
+            other => Item::new(other, self.title.trim()),
+        };
         if let Some(id) = self.id {
             item.id = id;
         }
@@ -84,14 +97,24 @@ impl Draft {
         item.password = self.password.clone();
         item.url = self.url.trim().to_string();
         item.notes = self.notes.clone();
+        item.fields = self.fields.clone();
         item
+    }
+}
+
+/// Заготовка полей для нового типа записи.
+fn template_fields(kind: ItemKind) -> Vec<Field> {
+    match kind {
+        ItemKind::Card => Item::new_card("").fields.clone(),
+        ItemKind::BankAccount => Item::new_bank_account("").fields.clone(),
+        _ => Vec::new(),
     }
 }
 
 enum DraftOutcome {
     Idle,
     Cancel,
-    Save { item: Item, is_new: bool },
+    Save { item: Box<Item>, is_new: bool },
 }
 
 struct App {
@@ -109,13 +132,17 @@ struct App {
     reveal_password: bool,
     clipboard: Option<(Instant, String)>,
     last_activity: Instant,
+    import_open: bool,
+    import_path: String,
+    import_format: ImportFormat,
+    import_result: Option<String>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_theme(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
-        let app = Self {
+        Self {
             mode: Mode::Open,
             path: default_vault_path(),
             password: String::new(),
@@ -130,9 +157,11 @@ impl App {
             reveal_password: false,
             clipboard: None,
             last_activity: Instant::now(),
-        };
-
-        app
+            import_open: false,
+            import_path: String::new(),
+            import_format: ImportFormat::Auto,
+            import_result: None,
+        }
     }
 
     fn lock(&mut self, reason: &str) {
@@ -147,6 +176,8 @@ impl App {
         self.confirm.zeroize();
         self.error = None;
         self.status = reason.to_string();
+        self.import_open = false;
+        self.import_result = None;
     }
 
     fn copy(&mut self, text: &str, label: &str) {
@@ -324,6 +355,10 @@ impl App {
                 if ui.button("Заблокировать").clicked() {
                     lock_requested = true;
                 }
+                if ui.button("Импорт…").clicked() {
+                    self.import_open = true;
+                    self.import_result = None;
+                }
                 ui.label(format!("Записей: {}", vault.items().len()));
             });
         });
@@ -386,8 +421,7 @@ impl App {
                 let Some(item) = selected_item else {
                     ui.add_space(18.0);
                     ui.label(
-                        egui::RichText::new("Выберите запись слева или создайте новую (+).")
-                            .weak(),
+                        egui::RichText::new("Выберите запись слева или создайте новую (+).").weak(),
                     );
                     return;
                 };
@@ -396,85 +430,114 @@ impl App {
                     .id_salt("item_detail")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(&item.title);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Удалить").clicked() {
-                            self.confirm_delete = Some(item.id);
-                        }
-                        if ui.button("Изменить").clicked() {
-                            self.draft = Some(Draft::from_item(&item));
-                        }
-                    });
-                });
-                ui.label(egui::RichText::new(item.kind.label()).weak().small());
-                ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.heading(&item.title);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Удалить").clicked() {
+                                        self.confirm_delete = Some(item.id);
+                                    }
+                                    if ui.button("Изменить").clicked() {
+                                        self.draft = Some(Draft::from_item(&item));
+                                    }
+                                },
+                            );
+                        });
+                        ui.label(egui::RichText::new(item.kind.label()).weak().small());
+                        ui.add_space(10.0);
 
-                egui::Grid::new("detail_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 10.0])
-                    .show(ui, |ui| {
-                        if !item.username.is_empty() {
-                            ui.label("Логин");
-                            ui.horizontal(|ui| {
-                                ui.monospace(&item.username);
-                                if ui.small_button("Копировать").clicked() {
-                                    self.copy(&item.username, "Логин");
+                        egui::Grid::new("detail_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 10.0])
+                            .show(ui, |ui| {
+                                if !item.username.is_empty() {
+                                    ui.label("Логин");
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(&item.username);
+                                        if ui.small_button("Копировать").clicked() {
+                                            self.copy(&item.username, "Логин");
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
+                                if !item.password.is_empty() {
+                                    ui.label("Пароль");
+                                    ui.horizontal(|ui| {
+                                        let shown = if self.reveal_password {
+                                            item.password.clone()
+                                        } else {
+                                            "•".repeat(item.password.chars().count().min(24))
+                                        };
+                                        ui.monospace(shown);
+                                        let toggle = if self.reveal_password {
+                                            "Скрыть"
+                                        } else {
+                                            "Показать"
+                                        };
+                                        if ui.small_button(toggle).clicked() {
+                                            self.reveal_password = !self.reveal_password;
+                                        }
+                                        if ui.small_button("Копировать").clicked() {
+                                            self.copy(&item.password, "Пароль");
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
+                                if !item.url.is_empty() {
+                                    ui.label("Сайт");
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(&item.url);
+                                        if ui.small_button("Копировать").clicked() {
+                                            self.copy(&item.url, "Сайт");
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
+                                for field in &item.fields {
+                                    if field.value.is_empty() {
+                                        continue;
+                                    }
+                                    ui.label(&field.label);
+                                    ui.horizontal(|ui| {
+                                        let shown = if field.sensitive && !self.reveal_password {
+                                            "•".repeat(field.value.chars().count().min(20))
+                                        } else {
+                                            field.value.clone()
+                                        };
+                                        ui.monospace(shown);
+                                        if field.sensitive {
+                                            let toggle = if self.reveal_password {
+                                                "Скрыть"
+                                            } else {
+                                                "Показать"
+                                            };
+                                            if ui.small_button(toggle).clicked() {
+                                                self.reveal_password = !self.reveal_password;
+                                            }
+                                        }
+                                        if ui.small_button("Копировать").clicked() {
+                                            self.copy(&field.value, &field.label);
+                                        }
+                                    });
+                                    ui.end_row();
                                 }
                             });
-                            ui.end_row();
-                        }
 
-                        if !item.password.is_empty() {
-                            ui.label("Пароль");
-                            ui.horizontal(|ui| {
-                                let shown = if self.reveal_password {
-                                    item.password.clone()
-                                } else {
-                                    "•".repeat(item.password.chars().count().min(24))
-                                };
-                                ui.monospace(shown);
-                                let toggle = if self.reveal_password {
-                                    "Скрыть"
-                                } else {
-                                    "Показать"
-                                };
-                                if ui.small_button(toggle).clicked() {
-                                    self.reveal_password = !self.reveal_password;
-                                }
-                                if ui.small_button("Копировать").clicked() {
-                                    self.copy(&item.password, "Пароль");
-                                }
-                            });
-                            ui.end_row();
+                        if !item.notes.is_empty() {
+                            ui.add_space(12.0);
+                            ui.label("Заметки");
+                            ui.label(&item.notes);
                         }
-
-                        if !item.url.is_empty() {
-                            ui.label("Сайт");
-                            ui.horizontal(|ui| {
-                                ui.monospace(&item.url);
-                                if ui.small_button("Копировать").clicked() {
-                                    self.copy(&item.url, "Сайт");
-                                }
-                            });
-                            ui.end_row();
-                        }
-                    });
-
-                if !item.notes.is_empty() {
-                    ui.add_space(12.0);
-                    ui.label("Заметки");
-                    ui.label(&item.notes);
-                }
                     });
             });
         });
 
         if let Some(id) = self.confirm_delete {
-            let title = vault
-                .get(id)
-                .map(|i| i.title.clone())
-                .unwrap_or_default();
+            let title = vault.get(id).map(|i| i.title.clone()).unwrap_or_default();
             let mut delete = false;
             let mut cancel = false;
 
@@ -513,10 +576,100 @@ impl App {
             }
         }
 
+        if self.import_open {
+            let mut close = false;
+            let mut run = false;
+
+            egui::Window::new("Импорт из другого менеджера")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(560.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label("Файл экспорта (.json или .csv)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_path)
+                            .hint_text("C:\\Users\\...\\bitwarden_export.json")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Формат:");
+                        egui::ComboBox::from_id_salt("import_format")
+                            .selected_text(self.import_format.label())
+                            .show_ui(ui, |ui| {
+                                for format in ImportFormat::all() {
+                                    ui.selectable_value(
+                                        &mut self.import_format,
+                                        format,
+                                        format.label(),
+                                    );
+                                }
+                            });
+                    });
+
+                    if let Some(result) = &self.import_result {
+                        ui.add_space(8.0);
+                        ui.label(result);
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Импортировать").clicked() {
+                            run = true;
+                        }
+                        if ui.button("Закрыть").clicked() {
+                            close = true;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("Совпадения по названию и логину пропускаются.")
+                            .weak()
+                            .small(),
+                    );
+                });
+
+            if run {
+                let path = self.import_path.trim().to_string();
+                if path.is_empty() {
+                    self.import_result = Some("Укажите путь к файлу.".to_string());
+                } else {
+                    match import_file(&mut vault, &path, self.import_format) {
+                        Ok(summary) => {
+                            let mut text = format!("Добавлено: {}.", summary.added);
+                            if summary.duplicates > 0 {
+                                text.push_str(&format!(
+                                    " Пропущено дубликатов: {}.",
+                                    summary.duplicates
+                                ));
+                            }
+                            if summary.unsupported > 0 {
+                                text.push_str(&format!(
+                                    " Не поддержано записей: {}.",
+                                    summary.unsupported
+                                ));
+                            }
+                            self.status = text.clone();
+                            self.import_result = Some(text);
+                        }
+                        Err(err) => {
+                            self.import_result = Some(format!("Ошибка: {err}"));
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.import_open = false;
+                self.import_result = None;
+            }
+        }
+
         match draw_draft(ui.ctx(), &mut self.draft) {
             DraftOutcome::Idle => {}
             DraftOutcome::Cancel => self.draft = None,
             DraftOutcome::Save { item, is_new } => {
+                let item = *item;
                 let result = if is_new {
                     vault.add(item.clone()).map(|_| ())
                 } else {
@@ -601,8 +754,16 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Тип:");
-                ui.selectable_value(&mut d.kind, ItemKind::Login, "Логин");
-                ui.selectable_value(&mut d.kind, ItemKind::SecureNote, "Заметка");
+                for kind in ItemKind::all() {
+                    if ui.selectable_label(d.kind == kind, kind.label()).clicked() && d.kind != kind
+                    {
+                        d.kind = kind;
+                        // Меняем заготовку полей, только если пользователь ничего не ввёл.
+                        if d.fields.iter().all(|f| f.value.trim().is_empty()) {
+                            d.fields = template_fields(kind);
+                        }
+                    }
+                }
             });
             ui.add_space(6.0);
 
@@ -643,6 +804,43 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
                     }
                 });
 
+            if matches!(d.kind, ItemKind::Card | ItemKind::BankAccount) {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Поля").strong());
+                let mut remove: Option<usize> = None;
+                for (idx, field) in d.fields.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut field.label).desired_width(130.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut field.value)
+                                .desired_width(220.0)
+                                .password(field.sensitive && !d.show_plain),
+                        );
+                        if field.sensitive
+                            && ui
+                                .small_button(if d.show_plain {
+                                    "Скрыть"
+                                } else {
+                                    "Показать"
+                                })
+                                .clicked()
+                        {
+                            d.show_plain = !d.show_plain;
+                        }
+                        if ui.small_button("✕").on_hover_text("Удалить поле").clicked()
+                        {
+                            remove = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = remove {
+                    d.fields.remove(idx);
+                }
+                if ui.small_button("+ Добавить поле").clicked() {
+                    d.fields.push(Field::new("Поле", ""));
+                }
+            }
+
             ui.add_space(6.0);
             ui.label("Заметки");
             ui.add(
@@ -659,7 +857,7 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
                     .clicked()
                 {
                     outcome = DraftOutcome::Save {
-                        item: d.build(),
+                        item: Box::new(d.build()),
                         is_new: d.id.is_none(),
                     };
                 }

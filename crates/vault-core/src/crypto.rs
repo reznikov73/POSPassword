@@ -1,7 +1,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
-    aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305, XNonce,
+    aead::{Aead, Payload},
 };
 use zeroize::Zeroizing;
 

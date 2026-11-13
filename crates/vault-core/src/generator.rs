@@ -73,7 +73,10 @@ pub fn generate_password(opts: &GeneratorOptions) -> Result<String> {
         charset.push_str(class);
     }
     let charset: Vec<char> = if opts.avoid_ambiguous {
-        charset.chars().filter(|c| !AMBIGUOUS.contains(*c)).collect()
+        charset
+            .chars()
+            .filter(|c| !AMBIGUOUS.contains(*c))
+            .collect()
     } else {
         charset.chars().collect()
     };
