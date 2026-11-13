@@ -1,0 +1,99 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Сборка (debug)",
+      "detail": "Компилирует ядро, CLI и приложение. Ошибки подсвечиваются прямо в коде.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--workspace"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Тесты",
+      "detail": "Запускает 15 тестов ядра: шифрование, формат файла, поиск, генератор.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["test", "--workspace"],
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Запуск приложения",
+      "detail": "Собирает и открывает окно «Хранитель».",
+      "type": "shell",
+      "command": "${workspaceFolder}/target/debug/vault-win.exe",
+      "dependsOn": ["Сборка (debug)"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Запуск CLI",
+      "detail": "Спрашивает аргументы и запускает командную строку. Пример: list C:/vault.opvault",
+      "type": "shell",
+      "command": "cargo run -p vault-cli -- ${input:cliArgs}",
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Сборка релиза",
+      "detail": "Оптимизированная сборка приложения: target/release/vault-win.exe.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--release", "-p", "vault-win"],
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Проверка clippy",
+      "detail": "Ищет сомнительные места в коде. Предупреждения считаются ошибками.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Проверка типов",
+      "detail": "Быстрая проверка без сборки бинарников.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["check", "--workspace"],
+      "problemMatcher": ["$rustc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Форматирование",
+      "detail": "Приводит код к единому виду (rustfmt).",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["fmt", "--all"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Проверка форматирования",
+      "detail": "Проверяет, что код отформатирован, ничего не меняя.",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["fmt", "--all", "--", "--check"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Всё перед коммитом",
+      "detail": "Форматирование, clippy и тесты — одной кнопкой.",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Форматирование", "Проверка clippy", "Тесты"],
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "cliArgs",
+      "type": "promptString",
+      "description": "Аргументы CLI (например: gen --length 24 или list C:/vault.opvault)",
+      "default": "help"
+    }
+  ]
+}

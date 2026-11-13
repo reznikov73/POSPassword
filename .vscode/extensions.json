@@ -1,0 +1,8 @@
+{
+  // Что предложит установить VS Code при открытии проекта.
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "ms-vscode.cpptools",
+    "tamasfe.even-better-toml"
+  ]
+}

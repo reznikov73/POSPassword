@@ -1,0 +1,49 @@
+{
+  // Кодировка и переводы строк: одинаково на всех машинах.
+  "files.encoding": "utf8",
+  "files.eol": "\n",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  // Форматирование при сохранении (rustfmt).
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+
+  // Терминал по умолчанию.
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+
+  // Скрываем тяжёлые папки сборки из поиска и проводника.
+  "search.exclude": {
+    "**/target": true,
+    "**/dist": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true
+  },
+
+  // rust-analyzer: проверка через clippy (установлен).
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.inlayHints.chainingHints.enable": true,
+  "rust-analyzer.imports.granularity.group": "module",
+
+  // Форматтеры по языкам.
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  "[json]": {
+    "editor.tabSize": 2
+  },
+  "[jsonc]": {
+    "editor.tabSize": 2
+  },
+  "[toml]": {
+    "editor.formatOnSave": false
+  },
+
+  // Cargo.lock показываем внутри Cargo.toml, чтобы не мешал.
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "Cargo.toml": "Cargo.lock"
+  }
+}

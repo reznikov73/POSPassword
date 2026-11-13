@@ -1,0 +1,9 @@
+[package]
+name = "vault-cli"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+vault-core = { path = "../vault-core" }
+rpassword = "1"
