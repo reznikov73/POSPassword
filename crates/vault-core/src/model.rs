@@ -13,6 +13,20 @@ pub enum ItemKind {
     SecureNote,
     Card,
     BankAccount,
+    Passport,
+    ForeignPassport,
+    Snils,
+    Inn,
+    DriverLicense,
+    MedicalPolicy,
+    DigitalSignature,
+    ApiKey,
+    Wifi,
+    Pin,
+    Insurance,
+    Property,
+    Health,
+    Vehicle,
 }
 
 impl ItemKind {
@@ -22,16 +36,172 @@ impl ItemKind {
             ItemKind::SecureNote => "Заметка",
             ItemKind::Card => "Карта",
             ItemKind::BankAccount => "Счёт",
+            ItemKind::Passport => "Паспорт РФ",
+            ItemKind::ForeignPassport => "Загранпаспорт",
+            ItemKind::Snils => "СНИЛС",
+            ItemKind::Inn => "ИНН",
+            ItemKind::DriverLicense => "Водительское",
+            ItemKind::MedicalPolicy => "Полис ОМС",
+            ItemKind::DigitalSignature => "ЭЦП",
+            ItemKind::ApiKey => "API-ключ",
+            ItemKind::Wifi => "Wi-Fi",
+            ItemKind::Pin => "PIN-код",
+            ItemKind::Insurance => "Страховка",
+            ItemKind::Property => "Недвижимость",
+            ItemKind::Health => "Медицина",
+            ItemKind::Vehicle => "Автомобиль",
         }
     }
 
-    pub fn all() -> [ItemKind; 4] {
+    pub fn all() -> [ItemKind; 18] {
         [
             ItemKind::Login,
             ItemKind::SecureNote,
             ItemKind::Card,
             ItemKind::BankAccount,
+            ItemKind::Passport,
+            ItemKind::ForeignPassport,
+            ItemKind::Snils,
+            ItemKind::Inn,
+            ItemKind::DriverLicense,
+            ItemKind::MedicalPolicy,
+            ItemKind::DigitalSignature,
+            ItemKind::ApiKey,
+            ItemKind::Wifi,
+            ItemKind::Pin,
+            ItemKind::Insurance,
+            ItemKind::Property,
+            ItemKind::Health,
+            ItemKind::Vehicle,
         ]
+    }
+
+    /// Готовый набор полей для типа записи. Пустой — только базовые поля.
+    pub fn template(self) -> Vec<Field> {
+        let plain = Field::new;
+        let secret = Field::secret;
+
+        match self {
+            ItemKind::Login | ItemKind::SecureNote => Vec::new(),
+
+            ItemKind::Card => vec![
+                plain("Владелец", ""),
+                secret("Номер карты", ""),
+                plain("Срок действия", ""),
+                secret("CVV", ""),
+                plain("Платёжная система", ""),
+                plain("Банк", ""),
+            ],
+
+            ItemKind::BankAccount => vec![
+                plain("Банк", ""),
+                secret("Номер счёта", ""),
+                secret("IBAN", ""),
+                plain("SWIFT/BIC", ""),
+                plain("Валюта", ""),
+            ],
+
+            ItemKind::Passport => vec![
+                secret("Серия и номер", ""),
+                plain("Кем выдан", ""),
+                plain("Дата выдачи", ""),
+                plain("Код подразделения", ""),
+                plain("Прописка", ""),
+            ],
+
+            ItemKind::ForeignPassport => vec![
+                secret("Серия и номер", ""),
+                plain("Кем выдан", ""),
+                plain("Дата выдачи", ""),
+                plain("Срок действия", ""),
+            ],
+
+            ItemKind::Snils => vec![secret("Номер СНИЛС", "")],
+
+            ItemKind::Inn => vec![
+                secret("Номер ИНН", ""),
+                plain("Налоговый орган", ""),
+                plain("Дата постановки на учёт", ""),
+            ],
+
+            ItemKind::DriverLicense => vec![
+                secret("Серия и номер", ""),
+                plain("Категории", ""),
+                plain("Дата выдачи", ""),
+                plain("Срок действия", ""),
+            ],
+
+            ItemKind::MedicalPolicy => vec![
+                secret("Номер полиса", ""),
+                plain("Страховая компания", ""),
+                plain("Срок действия", ""),
+            ],
+
+            ItemKind::DigitalSignature => vec![
+                plain("Владелец", ""),
+                plain("Носитель", ""),
+                secret("PIN-код", ""),
+                plain("Удостоверяющий центр", ""),
+                plain("Срок действия", ""),
+            ],
+
+            ItemKind::ApiKey => vec![
+                plain("Сервис", ""),
+                secret("Ключ", ""),
+                plain("Права доступа", ""),
+                plain("Срок действия", ""),
+            ],
+
+            ItemKind::Wifi => vec![
+                plain("Сеть (SSID)", ""),
+                secret("Пароль", ""),
+                plain("Тип шифрования", ""),
+                plain("Где находится", ""),
+            ],
+
+            ItemKind::Pin => vec![
+                plain("Назначение", ""),
+                secret("PIN", ""),
+                secret("PUK", ""),
+                plain("Примечание", ""),
+            ],
+
+            ItemKind::Insurance => vec![
+                plain("Страховая компания", ""),
+                secret("Номер полиса", ""),
+                plain("Вид страхования", ""),
+                plain("Срок действия", ""),
+                plain("Телефон", ""),
+            ],
+
+            ItemKind::Property => vec![
+                plain("Адрес", ""),
+                plain("Кадастровый номер", ""),
+                plain("Площадь", ""),
+                plain("Тип документа", ""),
+                plain("Номер документа", ""),
+                plain("Собственник", ""),
+            ],
+
+            ItemKind::Health => vec![
+                plain("Группа крови", ""),
+                plain("Аллергии", ""),
+                plain("Хронические болезни", ""),
+                plain("Лекарства", ""),
+                plain("Поликлиника", ""),
+                plain("Врач", ""),
+            ],
+
+            ItemKind::Vehicle => vec![
+                plain("Марка и модель", ""),
+                plain("VIN", ""),
+                plain("Госномер", ""),
+                secret("Номер СТС", ""),
+                secret("Номер ПТС", ""),
+                plain("ОСАГО до", ""),
+                plain("Техосмотр до", ""),
+            ],
+        }
     }
 }
 
@@ -80,7 +250,7 @@ pub struct Item {
     pub notes: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Поля карт, счетов и произвольные поля из импорта.
+    /// Поля карт, документов, счетов и произвольные поля из импорта.
     #[serde(default)]
     pub fields: Vec<Field>,
     pub created_at: i64,
@@ -105,31 +275,19 @@ impl Item {
         }
     }
 
-    /// Карта: заготовка полей, чтобы в форме сразу было что заполнять.
-    pub fn new_card(title: impl Into<String>) -> Self {
-        let mut item = Self::new(ItemKind::Card, title);
-        item.fields = vec![
-            Field::new("Владелец", ""),
-            Field::secret("Номер карты", ""),
-            Field::new("Срок действия", ""),
-            Field::secret("CVV", ""),
-            Field::new("Платёжная система", ""),
-            Field::new("Банк", ""),
-        ];
+    /// Запись с готовым набором полей для своего типа.
+    pub fn with_template(kind: ItemKind, title: impl Into<String>) -> Self {
+        let mut item = Self::new(kind, title);
+        item.fields = kind.template();
         item
     }
 
-    /// Банковский счёт: IBAN, SWIFT и прочее.
+    pub fn new_card(title: impl Into<String>) -> Self {
+        Self::with_template(ItemKind::Card, title)
+    }
+
     pub fn new_bank_account(title: impl Into<String>) -> Self {
-        let mut item = Self::new(ItemKind::BankAccount, title);
-        item.fields = vec![
-            Field::new("Банк", ""),
-            Field::secret("Номер счёта", ""),
-            Field::secret("IBAN", ""),
-            Field::new("SWIFT/BIC", ""),
-            Field::new("Валюта", ""),
-        ];
-        item
+        Self::with_template(ItemKind::BankAccount, title)
     }
 
     pub fn touch(&mut self) {
@@ -148,8 +306,9 @@ impl Item {
         }
     }
 
-    /// Поиск по видимым полям. Секретные значения (пароль, номер карты, CVV)
-    /// намеренно не индексируются: иначе по выдаче можно подтверждать догадки.
+    /// Поиск по видимым полям. Секретные значения (пароль, номер карты, CVV,
+    /// номера документов) намеренно не индексируются: иначе по выдаче можно
+    /// подтверждать догадки.
     pub fn matches(&self, query: &str) -> bool {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
@@ -191,7 +350,7 @@ pub struct VaultData {
 impl Default for VaultData {
     fn default() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             items: Vec::new(),
         }
     }

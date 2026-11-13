@@ -65,7 +65,7 @@ impl Draft {
             password: String::new(),
             url: String::new(),
             notes: String::new(),
-            fields: template_fields(kind),
+            fields: kind.template(),
             show_plain: true,
         }
     }
@@ -85,11 +85,7 @@ impl Draft {
     }
 
     fn build(&self) -> Item {
-        let mut item = match self.kind {
-            ItemKind::Card => Item::new_card(self.title.trim()),
-            ItemKind::BankAccount => Item::new_bank_account(self.title.trim()),
-            other => Item::new(other, self.title.trim()),
-        };
+        let mut item = Item::new(self.kind, self.title.trim());
         if let Some(id) = self.id {
             item.id = id;
         }
@@ -104,11 +100,7 @@ impl Draft {
 
 /// Заготовка полей для нового типа записи.
 fn template_fields(kind: ItemKind) -> Vec<Field> {
-    match kind {
-        ItemKind::Card => Item::new_card("").fields.clone(),
-        ItemKind::BankAccount => Item::new_bank_account("").fields.clone(),
-        _ => Vec::new(),
-    }
+    kind.template()
 }
 
 enum DraftOutcome {
@@ -381,10 +373,10 @@ impl App {
                     });
                     ui.add_space(6.0);
 
-                    let items: Vec<(Uuid, String, String)> = vault
+                    let items: Vec<(Uuid, String, String, ItemKind)> = vault
                         .search(&self.query)
                         .into_iter()
-                        .map(|i| (i.id, i.title.clone(), i.username.clone()))
+                        .map(|i| (i.id, i.title.clone(), i.username.clone(), i.kind))
                         .collect();
 
                     egui::ScrollArea::vertical()
@@ -394,11 +386,13 @@ impl App {
                             if items.is_empty() {
                                 ui.label(egui::RichText::new("Ничего не найдено").weak());
                             }
-                            for (id, title, username) in &items {
-                                let label = if username.is_empty() {
+                            for (id, title, username, kind) in &items {
+                                let label = if !username.is_empty() {
+                                    format!("{title}\n{username}")
+                                } else if matches!(kind, ItemKind::Login | ItemKind::SecureNote) {
                                     title.clone()
                                 } else {
-                                    format!("{title}\n{username}")
+                                    format!("{title}\n{}", kind.label())
                                 };
                                 if ui
                                     .selectable_label(self.selected == Some(*id), label)
@@ -754,14 +748,20 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Тип:");
-                for kind in ItemKind::all() {
-                    if ui.selectable_label(d.kind == kind, kind.label()).clicked() && d.kind != kind
-                    {
-                        d.kind = kind;
-                        // Меняем заготовку полей, только если пользователь ничего не ввёл.
-                        if d.fields.iter().all(|f| f.value.trim().is_empty()) {
-                            d.fields = template_fields(kind);
+                let mut chosen = d.kind;
+                egui::ComboBox::from_id_salt("draft_kind")
+                    .selected_text(d.kind.label())
+                    .width(230.0)
+                    .show_ui(ui, |ui| {
+                        for kind in ItemKind::all() {
+                            ui.selectable_value(&mut chosen, kind, kind.label());
                         }
+                    });
+                if chosen != d.kind {
+                    d.kind = chosen;
+                    // Меняем заготовку полей, только если пользователь ничего не ввёл.
+                    if d.fields.iter().all(|f| f.value.trim().is_empty()) {
+                        d.fields = template_fields(chosen);
                     }
                 }
             });
@@ -804,7 +804,7 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
                     }
                 });
 
-            if matches!(d.kind, ItemKind::Card | ItemKind::BankAccount) {
+            if !matches!(d.kind, ItemKind::Login | ItemKind::SecureNote) {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Поля").strong());
                 let mut remove: Option<usize> = None;
