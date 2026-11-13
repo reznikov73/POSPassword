@@ -50,7 +50,8 @@ cargo test --workspace                  # 15 тестов ядра
 Задачи в списке названы по-русски: «Сборка (debug)», «Тесты», «Запуск приложения»,
 «Всё перед коммитом» и другие. У каждой есть пояснение — оно видно при выборе.
 
-Подробная памятка: [docs/development.md](docs/development.md).
+Как пользоваться: [docs/usage.md](docs/usage.md).
+Как работать над кодом: [docs/development.md](docs/development.md).
 
 ## CLI
 
@@ -74,6 +75,7 @@ crates/vault-cli    командная строка
 apps/vault-win      оконный клиент (eframe/egui)
 docs/architecture.md  модель угроз, формат, решения и ограничения
 docs/development.md   как работать в VS Code: задачи, отладка, коммиты
+docs/usage.md         пошаговая инструкция для пользователя
 ```
 
 ## Проверено
