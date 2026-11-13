@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "vault-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rpassword",
  "vault-core",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "vault-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "eframe",

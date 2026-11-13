@@ -39,6 +39,83 @@ enum Mode {
     Create,
 }
 
+/// Оформление окна. Выбор сохраняется между запусками.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Theme {
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn label(self) -> &'static str {
+        match self {
+            Theme::Light => "светлая",
+            Theme::Dark => "тёмная",
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Light,
+        }
+    }
+
+    fn apply(self, ctx: &egui::Context) {
+        // egui хранит отдельные стили для светлой и тёмной темы; задаём оба,
+        // а затем жёстко выбираем нужную, чтобы системная тема не перебивала.
+        ctx.set_visuals_of(egui::Theme::Light, theme_visuals(true));
+        ctx.set_visuals_of(egui::Theme::Dark, theme_visuals(false));
+        match self {
+            Theme::Light => ctx.set_theme(egui::ThemePreference::Light),
+            Theme::Dark => ctx.set_theme(egui::ThemePreference::Dark),
+        }
+    }
+}
+
+fn theme_visuals(light: bool) -> egui::Visuals {
+    if light {
+        let mut visuals = egui::Visuals::light();
+        visuals.panel_fill = egui::Color32::from_rgb(244, 245, 247);
+        visuals.window_fill = egui::Color32::from_rgb(255, 255, 255);
+        visuals.faint_bg_color = egui::Color32::from_rgb(235, 238, 242);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(178, 205, 245);
+        visuals.selection.stroke.color = egui::Color32::from_rgb(20, 30, 50);
+        visuals
+    } else {
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = egui::Color32::from_rgb(24, 26, 31);
+        visuals.window_fill = egui::Color32::from_rgb(31, 34, 40);
+        visuals.faint_bg_color = egui::Color32::from_rgb(38, 41, 48);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(17, 19, 23);
+        visuals
+    }
+}
+
+fn settings_path() -> PathBuf {
+    app_dir().join("settings.txt")
+}
+
+fn load_theme() -> Theme {
+    match std::fs::read_to_string(settings_path()) {
+        Ok(text) if text.trim() == "dark" => Theme::Dark,
+        _ => Theme::Light,
+    }
+}
+
+fn save_theme(theme: Theme) {
+    let dir = app_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let value = match theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+    };
+    let _ = std::fs::write(dir.join("settings.txt"), value);
+}
+
 struct Draft {
     id: Option<Uuid>,
     kind: ItemKind,
@@ -128,11 +205,13 @@ struct App {
     import_path: String,
     import_format: ImportFormat,
     import_result: Option<String>,
+    theme: Theme,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        install_theme(&cc.egui_ctx);
+        let theme = load_theme();
+        theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
         Self {
             mode: Mode::Open,
@@ -153,6 +232,7 @@ impl App {
             import_path: String::new(),
             import_format: ImportFormat::Auto,
             import_result: None,
+            theme,
         }
     }
 
@@ -326,6 +406,15 @@ impl App {
                 .weak()
                 .small(),
             );
+            ui.add_space(8.0);
+            if ui
+                .small_button(format!("Тема: {}", self.theme.label()))
+                .clicked()
+            {
+                self.theme = self.theme.toggled();
+                self.theme.apply(ui.ctx());
+                save_theme(self.theme);
+            }
         });
     }
 
@@ -350,6 +439,11 @@ impl App {
                 if ui.button("Импорт…").clicked() {
                     self.import_open = true;
                     self.import_result = None;
+                }
+                if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
+                    self.theme = self.theme.toggled();
+                    self.theme.apply(ui.ctx());
+                    save_theme(self.theme);
                 }
                 ui.label(format!("Записей: {}", vault.items().len()));
             });
@@ -689,6 +783,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    // Фон окна берём из темы, иначе eframe заливает его чёрным.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
@@ -873,15 +972,6 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
     outcome
 }
 
-fn install_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = egui::Color32::from_rgb(24, 26, 31);
-    visuals.window_fill = egui::Color32::from_rgb(31, 34, 40);
-    visuals.faint_bg_color = egui::Color32::from_rgb(38, 41, 48);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(17, 19, 23);
-    ctx.set_visuals(visuals);
-}
-
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let candidates = [
@@ -908,7 +998,7 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn default_vault_path() -> String {
+fn app_dir() -> PathBuf {
     // В некоторых окружениях APPDATA не задан; тогда собираем путь от профиля.
     let base = std::env::var("APPDATA")
         .ok()
@@ -920,9 +1010,9 @@ fn default_vault_path() -> String {
         })
         .unwrap_or_else(|| ".".to_string());
 
-    PathBuf::from(base)
-        .join("Hranitel")
-        .join("vault.opvault")
-        .display()
-        .to_string()
+    PathBuf::from(base).join("Hranitel")
+}
+
+fn default_vault_path() -> String {
+    app_dir().join("vault.opvault").display().to_string()
 }
