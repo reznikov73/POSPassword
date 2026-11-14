@@ -88,6 +88,7 @@ crates/vault-core   формат файла, криптография, моде�
                     импорт, обёртка Hello, TOTP, аудит, экспорт
 crates/vault-cli    командная строка
 apps/vault-win      оконный клиент (eframe/egui), DPAPI и Windows Hello, справка
+tools/login-probe   окно-мишень для проверки автоввода (логин + пароль)
 scripts/package.ps1 готовая сборка в dist и zip
 docs/architecture.md  модель угроз, формат, решения и ограничения
 docs/development.md   как работать в VS Code: задачи, отладка, коммиты

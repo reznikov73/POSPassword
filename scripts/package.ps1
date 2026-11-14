@@ -14,7 +14,7 @@ try {
         $Version = $line.Matches[0].Groups[1].Value
     }
 
-    cargo build --release -p vault-win -p vault-cli
+    cargo build --release -p vault-win -p vault-cli -p login-probe
     if ($LASTEXITCODE -ne 0) { throw 'сборка не удалась' }
 
     $dst = Join-Path 'dist' "Hranitel-$Version-win64"
@@ -23,6 +23,11 @@ try {
 
     Copy-Item 'target\release\vault-win.exe', 'target\release\vault-cli.exe', 'README.md' $dst
     Copy-Item 'docs' $dst -Recurse
+
+    # Программа-мишень для проверки автоввода — отдельной папкой.
+    $tools = Join-Path $dst 'tools'
+    New-Item -ItemType Directory $tools -Force | Out-Null
+    Copy-Item 'target\release\login-probe.exe', 'tools\login-probe\README.md' $tools
 
     $zip = Join-Path 'dist' "Hranitel-$Version-win64.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }

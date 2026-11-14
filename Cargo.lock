@@ -2026,6 +2026,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "login-probe"
+version = "0.6.3"
+dependencies = [
+ "eframe",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3785,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "vault-cli"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "rpassword",
  "vault-core",
@@ -3793,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3815,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "vault-win"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "arboard",
  "eframe",

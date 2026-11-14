@@ -1,0 +1,8 @@
+[package]
+name = "login-probe"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+eframe = "0.37"
