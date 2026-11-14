@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use uuid::Uuid;
 use vault_core::{
-    Field, GeneratorOptions, ImportFormat, Item, ItemKind, Vault, generate_password,
-    generate_wrapping_key, import_file, protected_wrapping_key, sidecar_path,
+    ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, Totp, Vault, expiries,
+    generate_password, generate_wrapping_key, import_file, now_secs, protected_wrapping_key,
+    sidecar_path,
 };
 use zeroize::Zeroize;
 
@@ -32,7 +33,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1020.0, 680.0])
             .with_min_inner_size([760.0, 520.0])
-            .with_title(APP_TITLE),
+            .with_title(format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
     eframe::run_native(
@@ -219,6 +220,22 @@ struct App {
     hello_pending: Option<Receiver<Result<Vault, String>>>,
     /// Окно встроенной справки, открывается по F1.
     help_open: bool,
+    /// Курсор должен прыгнуть в поиск на следующем кадре (Ctrl+F).
+    focus_search: bool,
+    /// Диалог смены мастер-пароля.
+    password_open: bool,
+    password_current: String,
+    password_new: String,
+    password_confirm: String,
+    password_error: Option<String>,
+    /// Диалог экспорта.
+    export_open: bool,
+    export_format: ExportFormat,
+    export_path: String,
+    export_password: String,
+    export_result: Option<String>,
+    /// Панель аудита хранилища.
+    audit_open: bool,
 }
 
 impl App {
@@ -248,6 +265,18 @@ impl App {
             theme,
             hello_pending: None,
             help_open: false,
+            focus_search: false,
+            password_open: false,
+            password_current: String::new(),
+            password_new: String::new(),
+            password_confirm: String::new(),
+            password_error: None,
+            export_open: false,
+            export_format: ExportFormat::Json,
+            export_path: String::new(),
+            export_password: String::new(),
+            export_result: None,
+            audit_open: false,
         }
     }
 
@@ -527,6 +556,22 @@ impl App {
         };
         let mut lock_requested = false;
 
+        // Ctrl+C копирует пароль выбранной записи, но только когда ни одно
+        // поле ввода не в фокусе — иначе сломается обычное копирование текста.
+        let no_text_focus = ui.ctx().memory(|memory| memory.focused().is_none());
+        if no_text_focus
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
+            && let Some(id) = self.selected
+            && let Some(item) = vault.get(id)
+        {
+            let password = item.password.clone();
+            if !password.is_empty() {
+                self.copy(&password, "Пароль");
+            }
+        }
+
         ui.horizontal(|ui| {
             ui.heading(APP_TITLE);
             ui.add_space(8.0);
@@ -542,6 +587,36 @@ impl App {
                 if ui.button("Импорт…").clicked() {
                     self.import_open = true;
                     self.import_result = None;
+                }
+                if ui
+                    .button("Экспорт…")
+                    .on_hover_text("Копия в JSON или CSV")
+                    .clicked()
+                {
+                    self.export_open = true;
+                    self.export_result = None;
+                    self.export_password.clear();
+                    if self.export_path.is_empty() {
+                        self.export_path = default_export_path(vault.path(), self.export_format);
+                    }
+                }
+                if ui
+                    .button("Аудит")
+                    .on_hover_text("Слабые и повторяющиеся пароли, сроки действия")
+                    .clicked()
+                {
+                    self.audit_open = true;
+                }
+                if ui
+                    .button("Пароль")
+                    .on_hover_text("Сменить мастер-пароль")
+                    .clicked()
+                {
+                    self.password_open = true;
+                    self.password_error = None;
+                    self.password_current.clear();
+                    self.password_new.clear();
+                    self.password_confirm.clear();
                 }
                 let hello_on = sidecar_path(vault.path()).exists();
                 let hello_label = if hello_on {
@@ -599,11 +674,15 @@ impl App {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(
+                        let search = ui.add(
                             egui::TextEdit::singleline(&mut self.query)
-                                .hint_text("Поиск")
+                                .hint_text("Поиск (Ctrl+F)")
                                 .desired_width(250.0),
                         );
+                        if self.focus_search {
+                            search.request_focus();
+                            self.focus_search = false;
+                        }
                         if ui.button("+").on_hover_text("Новая запись").clicked() {
                             self.draft = Some(Draft::new_item());
                         }
@@ -677,6 +756,24 @@ impl App {
                         });
                         ui.label(egui::RichText::new(item.kind.label()).weak().small());
                         ui.add_space(10.0);
+
+                        let expiry_days = expiries(&item, now_secs() as i64);
+                        let totp_code = item
+                            .fields
+                            .iter()
+                            .find(|field| {
+                                field.label.to_ascii_lowercase().contains("totp")
+                                    || field
+                                        .value
+                                        .trim()
+                                        .to_ascii_lowercase()
+                                        .starts_with("otpauth://")
+                            })
+                            .and_then(|field| Totp::parse(&field.value).ok())
+                            .map(|totp| {
+                                let now = now_secs();
+                                (totp.code_at(now), totp.seconds_left(now))
+                            });
 
                         egui::Grid::new("detail_grid")
                             .num_columns(2)
@@ -752,6 +849,43 @@ impl App {
                                         }
                                         if ui.small_button("Копировать").clicked() {
                                             self.copy(&field.value, &field.label);
+                                        }
+                                        if let Some(expiry) = expiry_days
+                                            .iter()
+                                            .find(|expiry| expiry.label == field.label)
+                                        {
+                                            let days = expiry.days_left;
+                                            let (text, color) = if days < 0 {
+                                                (
+                                                    format!("просрочен на {} дн.", -days),
+                                                    egui::Color32::from_rgb(200, 70, 70),
+                                                )
+                                            } else {
+                                                (
+                                                    format!("осталось {} дн.", days),
+                                                    egui::Color32::from_rgb(190, 130, 40),
+                                                )
+                                            };
+                                            ui.colored_label(
+                                                color,
+                                                egui::RichText::new(text).small(),
+                                            );
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
+                                if let Some((code, seconds_left)) = &totp_code {
+                                    ui.label("Код TOTP");
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(code);
+                                        ui.label(
+                                            egui::RichText::new(format!("ещё {seconds_left} с"))
+                                                .weak()
+                                                .small(),
+                                        );
+                                        if ui.small_button("Копировать").clicked() {
+                                            self.copy(code, "Код TOTP");
                                         }
                                     });
                                     ui.end_row();
@@ -917,10 +1051,343 @@ impl App {
             }
         }
 
+        self.password_dialog(ui.ctx(), &mut vault);
+        self.export_dialog(ui.ctx(), &mut vault);
+        self.audit_dialog(ui.ctx(), &vault);
+
         if lock_requested {
             self.lock("Заблокировано.");
         } else {
             self.vault = Some(vault);
+        }
+    }
+
+    /// Диалог смены мастер-пароля.
+    fn password_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        if !self.password_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+
+        egui::Window::new("Сменить мастер-пароль")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Текущий пароль");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password_current)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+                ui.label("Новый пароль (не короче 8 символов)");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password_new)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+                ui.label("Повторите новый пароль");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password_confirm)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+
+                if let Some(error) = &self.password_error {
+                    ui.add_space(6.0);
+                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Сменить").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Файл будет перешифрован новым ключом, вход через Windows Hello отключится.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+
+        if cancel || !open {
+            self.password_open = false;
+            self.password_current.zeroize();
+            self.password_new.zeroize();
+            self.password_confirm.zeroize();
+            self.password_error = None;
+            return;
+        }
+
+        if submit {
+            self.password_error = None;
+            if self.password_new != self.password_confirm {
+                self.password_error = Some("Новые пароли не совпадают.".into());
+            } else if self.password_new.chars().count() < 8 {
+                self.password_error = Some("Новый пароль короче 8 символов.".into());
+            } else {
+                // Текущий пароль проверяем настоящей расшифровкой файла.
+                match Vault::open(vault.path(), &self.password_current) {
+                    Err(_) => {
+                        self.password_error = Some("Текущий пароль неверен.".into());
+                    }
+                    Ok(probe) => {
+                        drop(probe);
+                        match vault.change_password(&self.password_new) {
+                            Ok(()) => {
+                                self.status = "Мастер-пароль изменён. Вход через Windows Hello отключён — включите заново.".to_string();
+                                self.password_open = false;
+                                self.password_current.zeroize();
+                                self.password_new.zeroize();
+                                self.password_confirm.zeroize();
+                            }
+                            Err(err) => {
+                                self.password_error =
+                                    Some(format!("Не удалось сменить пароль: {err}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Диалог экспорта копии хранилища.
+    fn export_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        if !self.export_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut run = false;
+
+        egui::Window::new("Экспорт хранилища")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(190, 130, 40),
+                    "Файл будет содержать все пароли в открытом виде. Удалите его после переноса.",
+                );
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Формат:");
+                    let mut chosen = self.export_format;
+                    egui::ComboBox::from_id_salt("export_format")
+                        .selected_text(self.export_format.label())
+                        .show_ui(ui, |ui| {
+                            for format in ExportFormat::all() {
+                                ui.selectable_value(&mut chosen, format, format.label());
+                            }
+                        });
+                    if chosen != self.export_format {
+                        self.export_format = chosen;
+                        if !self.export_path.trim().is_empty() {
+                            self.export_path = PathBuf::from(self.export_path.trim())
+                                .with_extension(chosen.extension())
+                                .display()
+                                .to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.label("Файл");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.export_path)
+                        .hint_text("C:\\Users\\...\\hranitel-export.json")
+                        .desired_width(f32::INFINITY),
+                );
+                if !self.export_path.trim().is_empty()
+                    && Path::new(self.export_path.trim()).exists()
+                {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(190, 130, 40),
+                        "Файл с таким именем уже есть — он будет перезаписан.",
+                    );
+                }
+                ui.add_space(6.0);
+                ui.label("Подтвердите мастер-пароль");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.export_password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+
+                if let Some(result) = &self.export_result {
+                    ui.add_space(8.0);
+                    ui.label(result);
+                }
+
+                ui.add_space(10.0);
+                if ui.button("Экспортировать").clicked() {
+                    run = true;
+                }
+            });
+
+        if !open {
+            self.export_open = false;
+            self.export_password.zeroize();
+            return;
+        }
+
+        if run {
+            let path = self.export_path.trim().to_string();
+            if path.is_empty() {
+                self.export_result = Some("Укажите путь к файлу.".to_string());
+                return;
+            }
+            match Vault::open(vault.path(), &self.export_password) {
+                Err(_) => self.export_result = Some("Мастер-пароль неверен.".to_string()),
+                Ok(probe) => {
+                    drop(probe);
+                    match vault.export(self.export_format) {
+                        Ok(text) => match std::fs::write(&path, text) {
+                            Ok(()) => {
+                                let count = vault.items().len();
+                                self.status = format!("Экспортировано записей: {count}.");
+                                self.export_result = Some(format!(
+                                    "Сохранено записей: {count}. Файл содержит открытые пароли — удалите его после переноса."
+                                ));
+                                self.export_password.zeroize();
+                            }
+                            Err(err) => {
+                                self.export_result =
+                                    Some(format!("Не удалось записать файл: {err}"));
+                            }
+                        },
+                        Err(err) => self.export_result = Some(format!("Ошибка экспорта: {err}")),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Панель аудита: сроки действия, повторяющиеся и короткие пароли.
+    fn audit_dialog(&mut self, ctx: &egui::Context, vault: &Vault) {
+        if !self.audit_open {
+            return;
+        }
+
+        let report = vault.audit();
+        let mut open = true;
+
+        egui::Window::new("Аудит хранилища")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Проверка идёт по расшифрованным записям на этом компьютере.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("audit_scroll")
+                    .auto_shrink([false, false])
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        if report.is_empty() {
+                            ui.label(
+                                "Нарушений не найдено: пароли длинные и разные, сроки в порядке.",
+                            );
+                            return;
+                        }
+                        draw_findings(
+                            ui,
+                            "Сроки действия",
+                            &report.expiring,
+                            &mut self.selected,
+                            &mut self.audit_open,
+                        );
+                        draw_findings(
+                            ui,
+                            "Повторяющиеся пароли",
+                            &report.reused,
+                            &mut self.selected,
+                            &mut self.audit_open,
+                        );
+                        draw_findings(
+                            ui,
+                            "Короткие пароли",
+                            &report.weak,
+                            &mut self.selected,
+                            &mut self.audit_open,
+                        );
+                        draw_findings(
+                            ui,
+                            "Давно не обновлялись",
+                            &report.old,
+                            &mut self.selected,
+                            &mut self.audit_open,
+                        );
+                    });
+            });
+
+        if !open {
+            self.audit_open = false;
+        }
+    }
+}
+
+/// Путь экспорта по умолчанию — рядом с хранилищем.
+fn default_export_path(vault_path: &Path, format: ExportFormat) -> String {
+    vault_path
+        .with_file_name(format!("hranitel-export.{}", format.extension()))
+        .display()
+        .to_string()
+}
+
+/// Рисует группу находок аудита; клик выбирает запись и закрывает панель.
+fn draw_findings(
+    ui: &mut egui::Ui,
+    title: &str,
+    findings: &[vault_core::Finding],
+    selected: &mut Option<Uuid>,
+    open: &mut bool,
+) {
+    if findings.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(format!("{title} — {}", findings.len()))
+            .strong()
+            .size(15.0),
+    );
+    for finding in findings {
+        let text = format!(
+            "{} · {} — {}",
+            finding.title,
+            finding.kind.label(),
+            finding.detail
+        );
+        if ui.selectable_label(false, text).clicked() {
+            *selected = Some(finding.id);
+            *open = false;
         }
     }
 }
@@ -955,6 +1422,26 @@ impl eframe::App for App {
             .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::H));
         if f1_pressed {
             self.help_open = !self.help_open;
+        }
+
+        // Ctrl+F — курсор в поиск; Esc закрывает диалоги и очищает поиск.
+        if self.vault.is_some()
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
+        {
+            self.focus_search = true;
+        }
+        if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) && !self.help_open {
+            if self.password_open {
+                self.password_open = false;
+            } else if self.export_open {
+                self.export_open = false;
+            } else if self.audit_open {
+                self.audit_open = false;
+            } else if !self.query.is_empty() {
+                self.query.clear();
+            }
         }
 
         let status_height = 34.0;

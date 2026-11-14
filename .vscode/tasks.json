@@ -47,6 +47,15 @@
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
+      "label": "Собрать дистрибутив",
+      "detail": "Релизная сборка плюс готовый пакет dist\\Hranitel-<версия>-win64 и zip рядом.",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/package.ps1"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
       "label": "Проверка clippy",
       "detail": "Ищет сомнительные места в коде. Предупреждения считаются ошибками.",
       "type": "shell",

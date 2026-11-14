@@ -29,6 +29,9 @@ pub enum Error {
     #[error("ошибка сериализации: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("ошибка CSV: {0}")]
+    Csv(#[from] csv::Error),
+
     #[error("запись не найдена: {0}")]
     ItemNotFound(String),
 

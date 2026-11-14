@@ -9,11 +9,16 @@ aes-gcm = "0.11.1"
 argon2 = "0.6.0"
 chacha20poly1305 = "0.11.0"
 csv = "1"
+data-encoding = "2.11.1"
+hmac = "0.13.0"
 rand = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = "0.11.0"
+sha2 = "0.11.1"
 tempfile = "3"
 thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["parsing", "macros"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 

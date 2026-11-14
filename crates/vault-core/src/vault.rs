@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::audit::{AuditReport, audit};
 use crate::crypto::{self, KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
+use crate::export::{ExportFormat, export_csv, export_json};
 use crate::hello::{self, HelloEnvelope};
 use crate::model::{Item, VaultData, now_secs};
 use crate::{Error, Result};
@@ -278,6 +280,19 @@ impl Vault {
     /// Отсутствие сайдкара не ошибка.
     pub fn disable_hello(&mut self) -> Result<()> {
         remove_hello_sidecar(&self.path)
+    }
+
+    /// Аудит записей: пароли, сроки действия, давно не обновлённые.
+    pub fn audit(&self) -> AuditReport {
+        audit(&self.data.items, now_secs())
+    }
+
+    /// Экспорт всех записей в выбранный формат.
+    pub fn export(&self, format: ExportFormat) -> Result<String> {
+        match format {
+            ExportFormat::Json => export_json(&self.data.items, now_secs()),
+            ExportFormat::Csv => export_csv(&self.data.items),
+        }
     }
 
     /// Перешифровывает и записывает файл. Nonce всегда новый.

@@ -11,18 +11,24 @@
 //! XChaCha20-Poly1305. Заголовок целиком передаётся как AAD, поэтому его нельзя
 //! подменить, не сломав аутентификацию.
 
+mod audit;
 mod crypto;
 mod error;
+mod export;
 mod generator;
 mod hello;
 mod import;
 mod model;
+mod totp;
 mod vault;
 
+pub use audit::{AuditReport, Expiry, Finding, audit, expiries, is_expiry_label, parse_date};
 pub use crypto::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 pub use error::{Error, Result};
+pub use export::{ExportFormat, export_csv, export_json};
 pub use generator::{GeneratorOptions, generate_password};
 pub use hello::{generate_wrapping_key, protected_wrapping_key, sidecar_path};
 pub use import::{ImportFormat, ImportSummary, import_file};
 pub use model::{Field, Item, ItemKind, VaultData};
+pub use totp::{Totp, now_secs};
 pub use vault::{FORMAT_VERSION, MAGIC, Vault};
