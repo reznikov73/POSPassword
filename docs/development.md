@@ -54,6 +54,24 @@ git --version
 
 После изменения ядра обязательно запустите «Тесты».
 
+## 4.1 Сборка дистрибутива
+
+Пользователь запускает не `target\release`, а готовый пакет из `dist`:
+
+```powershell
+cargo build --release -p vault-win -p vault-cli
+$v = "0.4.0"   # версия из корневого Cargo.toml
+$dst = "dist\Hranitel-$v-win64"
+New-Item -ItemType Directory $dst -Force | Out-Null
+Copy-Item target\release\vault-win.exe, target\release\vault-cli.exe, README.md $dst
+Copy-Item docs $dst -Recurse
+Compress-Archive -Path $dst -DestinationPath "dist\Hranitel-$v-win64.zip" -Force
+```
+
+Важно: старые пакеты в `dist` не удаляются сами. Если после изменения функций
+пользователь запускает вчерашний exe, он не увидит новых кнопок и горячих клавиш —
+всегда передавайте путь к самому свежему пакету.
+
 ## 5. Сохранение версий
 
 Обычный порядок:
