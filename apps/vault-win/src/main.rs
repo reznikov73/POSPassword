@@ -7,6 +7,7 @@
 // фокус и клавиши (включая F1). В отладочной сборке консоль остаётся для логов.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autotype;
 mod hello_win;
 mod help;
 
@@ -22,7 +23,7 @@ use vault_core::{
     generate_password, generate_wrapping_key, import_file, now_secs, protected_wrapping_key,
     sidecar_path,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const APP_TITLE: &str = "Хранитель";
 const AUTO_LOCK: Duration = Duration::from_secs(5 * 60);
@@ -243,6 +244,14 @@ impl App {
         let theme = load_theme();
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
+
+        // Горячая клавиша автоввода живёт, пока запущено приложение.
+        let status = match autotype::start(cc.egui_ctx.clone()) {
+            Ok(()) => "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
+            Err(err) => format!(
+                "Автоввод (Ctrl+Alt+A) недоступен: {err}. Введите мастер-пароль, чтобы открыть хранилище."
+            ),
+        };
         Self {
             mode: Mode::Open,
             path: default_vault_path(),
@@ -253,7 +262,7 @@ impl App {
             selected: None,
             draft: None,
             confirm_delete: None,
-            status: "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
+            status,
             error: None,
             reveal_password: false,
             clipboard: None,
@@ -369,6 +378,17 @@ impl App {
             }
             Err(err) => self.error = Some(err.to_string()),
         }
+    }
+
+    /// Данные для автоввода из выбранной записи.
+    fn autotype_credentials(&self) -> Option<autotype::Credentials> {
+        let vault = self.vault.as_ref()?;
+        let item = vault.get(self.selected?)?;
+        Some(autotype::Credentials {
+            title: item.title.clone(),
+            username: item.username.clone(),
+            password: Zeroizing::new(item.password.clone()),
+        })
     }
 
     /// Сайдкар Windows Hello для выбранного пути, если он существует.
@@ -584,12 +604,12 @@ impl App {
                 if ui.button("Заблокировать").clicked() {
                     lock_requested = true;
                 }
-                if ui.button("Импорт…").clicked() {
+                if ui.button("Импорт").on_hover_text("Импорт из Bitwarden или 1Password").clicked() {
                     self.import_open = true;
                     self.import_result = None;
                 }
                 if ui
-                    .button("Экспорт…")
+                    .button("Экспорт")
                     .on_hover_text("Копия в JSON или CSV")
                     .clicked()
                 {
@@ -619,11 +639,7 @@ impl App {
                     self.password_confirm.clear();
                 }
                 let hello_on = sidecar_path(vault.path()).exists();
-                let hello_label = if hello_on {
-                    "Hello: включён"
-                } else {
-                    "Hello: выключен"
-                };
+                let hello_label = if hello_on { "Hello: вкл" } else { "Hello: выкл" };
                 if ui
                     .button(hello_label)
                     .on_hover_text("Разблокировка без мастер-пароля через Windows Hello")
@@ -660,10 +676,9 @@ impl App {
                     self.theme.apply(ui.ctx());
                     save_theme(self.theme);
                 }
-                if ui.button("Справка (F1)").clicked() {
+                if ui.button("Справка").clicked() {
                     self.help_open = true;
                 }
-                ui.label(format!("Записей: {}", vault.items().len()));
             });
         });
         ui.separator();
@@ -1425,6 +1440,10 @@ impl eframe::App for App {
         }
 
         // Ctrl+F — курсор в поиск; Esc закрывает диалоги и очищает поиск.
+        autotype::set_credentials(self.autotype_credentials());
+        if let Some(message) = autotype::take_message() {
+            self.status = message;
+        }
         if self.vault.is_some()
             && ui
                 .ctx()
@@ -1454,6 +1473,8 @@ impl eframe::App for App {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
+                        // Занимаем всю высоту, чтобы строка состояния была внизу окна.
+                        ui.set_min_height(ui.available_height());
                         if self.vault.is_some() {
                             self.main_ui(ui);
                         } else {
@@ -1465,6 +1486,14 @@ impl eframe::App for App {
 
         ui.separator();
         ui.horizontal(|ui| {
+            if let Some(vault) = &self.vault {
+                ui.label(
+                    egui::RichText::new(format!("Записей: {}", vault.items().len()))
+                        .small()
+                        .weak(),
+                );
+                ui.separator();
+            }
             ui.label(egui::RichText::new(&self.status).small().weak());
             if self.clipboard.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
