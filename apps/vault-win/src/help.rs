@@ -130,6 +130,7 @@ const SECTIONS: &[Section] = &[
         title: "Горячие клавиши",
         body: &[
             "- F1 — открыть или закрыть эту справку.",
+            "- Ctrl+H — то же самое, если F1 занята (например, мультимедиа на ноутбуке).",
             "- Enter в поле пароля — открыть хранилище.",
             "- Tab и Shift+Tab — переход между полями.",
         ],
@@ -162,9 +163,11 @@ pub fn show(ctx: &egui::Context, open: &mut bool) {
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.label(
-                egui::RichText::new("Инструкция по всем функциям. Закрыть — F1, Esc или крестик.")
-                    .weak()
-                    .small(),
+                egui::RichText::new(
+                    "Инструкция по всем функциям. Закрыть — F1, Ctrl+H, Esc или крестик.",
+                )
+                .weak()
+                .small(),
             );
             ui.separator();
 
@@ -215,6 +218,37 @@ mod tests {
                 section.title
             );
         }
+    }
+
+    #[test]
+    fn f1_event_is_visible_in_input() {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: Some(egui::Key::F1),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut seen = false;
+        let mut output = ctx.run_ui(raw, |ui| {
+            seen = ui.ctx().input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::F1,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                })
+            });
+        });
+        output.textures_delta.clear();
+        assert!(seen, "F1 должно быть видно в событиях кадра");
     }
 
     #[test]

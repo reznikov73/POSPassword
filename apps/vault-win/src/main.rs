@@ -3,6 +3,10 @@
 //! Вся криптография и работа с файлом — в `vault-core`; здесь только UI,
 //! буфер обмена с автоочисткой и автоблокировка.
 
+// В релизе не открываем консольное окно рядом с интерфейсом: оно забирает
+// фокус и клавиши (включая F1). В отладочной сборке консоль остаётся для логов.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod hello_win;
 mod help;
 
@@ -931,11 +935,25 @@ impl eframe::App for App {
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
 
-        // F1 открывает и закрывает встроенную справку в любом месте программы.
-        if ui
+        // F1 открывает и закрывает справку в любом месте программы. Событие
+        // разбираем напрямую: так работает и при необычных модификаторах.
+        // Ctrl+H — запасной вариант для ноутбуков, где F1 занята мультимедиа.
+        let f1_pressed = ui.ctx().input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::F1,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            })
+        }) || ui
             .ctx()
-            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1))
-        {
+            .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::H));
+        if f1_pressed {
             self.help_open = !self.help_open;
         }
 
