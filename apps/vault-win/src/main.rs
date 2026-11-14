@@ -379,11 +379,13 @@ impl App {
 
         match result {
             Ok(vault) => {
+                let first = vault.items_sorted().first().map(|item| item.id);
                 self.status = match self.mode {
                     Mode::Open => "Хранилище открыто.".to_string(),
                     Mode::Create => "Хранилище создано.".to_string(),
                 };
                 self.vault = Some(vault);
+                self.selected = first;
                 self.hello_pending = None;
                 self.password.zeroize();
                 self.confirm.zeroize();
@@ -447,15 +449,26 @@ impl App {
         }
     }
 
-    /// Данные для автоввода из выбранной записи.
-    fn autotype_credentials(&self) -> Option<autotype::Credentials> {
-        let vault = self.vault.as_ref()?;
-        let item = vault.get(self.selected?)?;
-        Some(autotype::Credentials {
+    /// Состояние автоввода: закрыто, без выбора или готовая запись.
+    fn autotype_state(&self) -> autotype::AutotypeState {
+        let Some(vault) = self.vault.as_ref() else {
+            return autotype::AutotypeState::Locked;
+        };
+        let Some(item) = self.selected.and_then(|id| vault.get(id)) else {
+            return autotype::AutotypeState::NoSelection;
+        };
+        autotype::AutotypeState::Ready(autotype::Credentials {
             title: item.title.clone(),
             username: item.username.clone(),
             password: Zeroizing::new(item.password.clone()),
         })
+    }
+
+    /// Название записи, готовой к автовводу (для подсказки в углу).
+    fn autotype_title(&self) -> Option<String> {
+        let vault = self.vault.as_ref()?;
+        let item = vault.get(self.selected?)?;
+        Some(item.title.clone())
     }
 
     /// Сайдкар Windows Hello для выбранного пути, если он существует.
@@ -501,7 +514,9 @@ impl App {
         match receiver.try_recv() {
             Ok(Ok(vault)) => {
                 self.hello_pending = None;
+                let first = vault.items_sorted().first().map(|item| item.id);
                 self.vault = Some(vault);
+                self.selected = first;
                 self.password.zeroize();
                 self.confirm.zeroize();
                 self.mode = Mode::Open;
@@ -1517,8 +1532,12 @@ impl eframe::App for App {
         }
 
         // Ctrl+F — курсор в поиск; Esc закрывает диалоги и очищает поиск.
-        autotype::set_credentials(self.autotype_credentials());
+        autotype::set_state(self.autotype_state());
         if let Some(message) = autotype::take_message() {
+            if message.starts_with("Автоввод") {
+                // Нечего печатать — показываем окно, чтобы сообщение точно увидели.
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
             self.status = message.clone();
             self.autotype_notice = Some((message, Instant::now()));
         }
@@ -1574,10 +1593,12 @@ impl eframe::App for App {
             }
             ui.label(egui::RichText::new(&self.status).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let hint = if self.autotype_ready {
-                    "Ctrl+Alt+A — автоввод"
+                let hint = if !self.autotype_ready {
+                    "автоввод недоступен".to_string()
+                } else if let Some(title) = self.autotype_title() {
+                    format!("Автоввод: {title}")
                 } else {
-                    "автоввод недоступен"
+                    "Ctrl+Alt+A — автоввод".to_string()
                 };
                 ui.label(egui::RichText::new(hint).small().weak());
                 if self.clipboard.is_some() {

@@ -37,9 +37,19 @@ pub struct Credentials {
     pub password: Zeroizing<String>,
 }
 
+/// Состояние автоввода, которое UI публикует для потока горячей клавиши.
+pub enum AutotypeState {
+    /// Хранилище закрыто.
+    Locked,
+    /// Хранилище открыто, но запись не выбрана.
+    NoSelection,
+    /// Готово к вводу.
+    Ready(Credentials),
+}
+
 struct Shared {
-    /// Текущая выбранная запись. `None` — хранилище заблокировано или ничего не выбрано.
-    credentials: Mutex<Option<Credentials>>,
+    /// Текущее состояние автоввода.
+    state: Mutex<AutotypeState>,
     /// Что показать в строке состояния после последнего нажатия.
     message: Mutex<Option<String>>,
 }
@@ -47,7 +57,7 @@ struct Shared {
 fn shared() -> &'static Shared {
     static SHARED: OnceLock<Shared> = OnceLock::new();
     SHARED.get_or_init(|| Shared {
-        credentials: Mutex::new(None),
+        state: Mutex::new(AutotypeState::Locked),
         message: Mutex::new(None),
     })
 }
@@ -96,21 +106,22 @@ pub fn start(ctx: egui::Context) -> Result<(), String> {
     }
 }
 
-/// Отдаёт потоку горячей клавиши актуальную запись. Вызывается из UI.
-pub fn set_credentials(credentials: Option<Credentials>) {
-    let Ok(mut guard) = shared().credentials.lock() else {
+/// Отдаёт потоку горячей клавиши актуальное состояние. Вызывается из UI.
+pub fn set_state(state: AutotypeState) {
+    let Ok(mut guard) = shared().state.lock() else {
         return;
     };
-    let same = match (&*guard, &credentials) {
-        (None, None) => true,
-        (Some(old), Some(new)) => {
+    let same = match (&*guard, &state) {
+        (AutotypeState::Locked, AutotypeState::Locked) => true,
+        (AutotypeState::NoSelection, AutotypeState::NoSelection) => true,
+        (AutotypeState::Ready(old), AutotypeState::Ready(new)) => {
             old.title == new.title && old.username == new.username && *old.password == *new.password
         }
         _ => false,
     };
     if !same {
-        // Прежний набор зануляется при замене.
-        *guard = credentials;
+        // Прежний набор пароля зануляется при замене.
+        *guard = state;
     }
 }
 
@@ -131,15 +142,24 @@ pub fn run_now() -> String {
 
 /// Один автоввод: берёт текущую запись и печатает её в активное окно.
 fn autotype_once() -> String {
-    let credentials = shared()
-        .credentials
+    let state = shared()
+        .state
         .lock()
-        .ok()
-        .and_then(|slot| slot.clone());
+        .map(|guard| match &*guard {
+            AutotypeState::Locked => AutotypeState::Locked,
+            AutotypeState::NoSelection => AutotypeState::NoSelection,
+            AutotypeState::Ready(credentials) => AutotypeState::Ready(credentials.clone()),
+        })
+        .unwrap_or(AutotypeState::Locked);
 
-    let Some(credentials) = credentials else {
-        return "Автоввод: сначала разблокируйте хранилище и выберите запись (Ctrl+Alt+A)."
-            .to_string();
+    let credentials = match state {
+        AutotypeState::Locked => {
+            return "Автоввод: хранилище заблокировано. Откройте его мастер-паролем.".to_string();
+        }
+        AutotypeState::NoSelection => {
+            return "Автоввод: выберите запись в списке — печатается выбранная запись.".to_string();
+        }
+        AutotypeState::Ready(credentials) => credentials,
     };
 
     if credentials.username.is_empty() && credentials.password.is_empty() {
