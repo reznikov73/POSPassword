@@ -237,6 +237,12 @@ struct App {
     export_result: Option<String>,
     /// Панель аудита хранилища.
     audit_open: bool,
+    /// Зарегистрирована ли горячая клавиша автоввода.
+    autotype_ready: bool,
+    /// Момент, когда надо выполнить автоввод после кнопки с отсчётом.
+    autotype_countdown: Option<Instant>,
+    /// Сообщение автоввода на несколько секунд поверх окна.
+    autotype_notice: Option<(String, Instant)>,
 }
 
 impl App {
@@ -246,10 +252,16 @@ impl App {
         install_fonts(&cc.egui_ctx);
 
         // Горячая клавиша автоввода живёт, пока запущено приложение.
-        let status = match autotype::start(cc.egui_ctx.clone()) {
-            Ok(()) => "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
-            Err(err) => format!(
-                "Автоввод (Ctrl+Alt+A) недоступен: {err}. Введите мастер-пароль, чтобы открыть хранилище."
+        let (autotype_ready, status) = match autotype::start(cc.egui_ctx.clone()) {
+            Ok(()) => (
+                true,
+                "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
+            ),
+            Err(err) => (
+                false,
+                format!(
+                    "Автоввод (Ctrl+Alt+A) недоступен: {err}. Введите мастер-пароль, чтобы открыть хранилище."
+                ),
             ),
         };
         Self {
@@ -286,6 +298,9 @@ impl App {
             export_password: String::new(),
             export_result: None,
             audit_open: false,
+            autotype_ready,
+            autotype_countdown: None,
+            autotype_notice: None,
         }
     }
 
@@ -377,6 +392,58 @@ impl App {
                 self.error = None;
             }
             Err(err) => self.error = Some(err.to_string()),
+        }
+    }
+
+    /// Отсчёт перед вводом и всплывающее сообщение о результате.
+    fn autotype_overlay(&mut self, ctx: &egui::Context) {
+        if let Some(deadline) = self.autotype_countdown {
+            let now = Instant::now();
+            if now >= deadline {
+                self.autotype_countdown = None;
+                let message = autotype::run_now();
+                self.status = message.clone();
+                self.autotype_notice = Some((message, Instant::now()));
+            } else {
+                let left = (deadline - now).as_secs_f32().ceil() as u64;
+                egui::Window::new("Автоввод через…")
+                    .title_bar(false)
+                    .resizable(false)
+                    .collapsible(false)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("Переключитесь в целевое окно… {left}"))
+                                .strong()
+                                .size(18.0),
+                        );
+                    });
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+
+        let mut expired = false;
+        if let Some((message, at)) = &self.autotype_notice {
+            if at.elapsed() < Duration::from_secs(5) {
+                egui::Window::new("Автоввод")
+                    .title_bar(false)
+                    .resizable(false)
+                    .collapsible(false)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(message)
+                                .color(egui::Color32::from_rgb(190, 110, 40))
+                                .strong(),
+                        );
+                    });
+                ctx.request_repaint_after(Duration::from_millis(200));
+            } else {
+                expired = true;
+            }
+        }
+        if expired {
+            self.autotype_notice = None;
         }
     }
 
@@ -765,6 +832,16 @@ impl App {
                                     }
                                     if ui.button("Изменить").clicked() {
                                         self.draft = Some(Draft::from_item(&item));
+                                    }
+                                    if ui
+                                        .button("Ввести в окно")
+                                        .on_hover_text(
+                                            "Через 3 секунды напечатать логин и пароль в активное окно",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.autotype_countdown =
+                                            Some(Instant::now() + Duration::from_secs(3));
                                     }
                                 },
                             );
@@ -1442,7 +1519,8 @@ impl eframe::App for App {
         // Ctrl+F — курсор в поиск; Esc закрывает диалоги и очищает поиск.
         autotype::set_credentials(self.autotype_credentials());
         if let Some(message) = autotype::take_message() {
-            self.status = message;
+            self.status = message.clone();
+            self.autotype_notice = Some((message, Instant::now()));
         }
         if self.vault.is_some()
             && ui
@@ -1495,18 +1573,26 @@ impl eframe::App for App {
                 ui.separator();
             }
             ui.label(egui::RichText::new(&self.status).small().weak());
-            if self.clipboard.is_some() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let hint = if self.autotype_ready {
+                    "Ctrl+Alt+A — автоввод"
+                } else {
+                    "автоввод недоступен"
+                };
+                ui.label(egui::RichText::new(hint).small().weak());
+                if self.clipboard.is_some() {
+                    ui.separator();
                     ui.label(
                         egui::RichText::new("буфер обмена будет очищен автоматически")
                             .small()
                             .weak(),
                     );
-                });
-            }
+                }
+            });
         });
 
         help::show(ui.ctx(), &mut self.help_open);
+        self.autotype_overlay(ui.ctx());
     }
 }
 

@@ -123,6 +123,12 @@ pub fn take_message() -> Option<String> {
         .and_then(|mut slot| slot.take())
 }
 
+/// Один автоввод по запросу из UI (кнопка с отсчётом).
+/// Возвращает текст для строки состояния.
+pub fn run_now() -> String {
+    autotype_once()
+}
+
 /// Один автоввод: берёт текущую запись и печатает её в активное окно.
 fn autotype_once() -> String {
     let credentials = shared()
