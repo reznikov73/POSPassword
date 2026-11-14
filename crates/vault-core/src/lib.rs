@@ -14,6 +14,7 @@
 mod crypto;
 mod error;
 mod generator;
+mod hello;
 mod import;
 mod model;
 mod vault;
@@ -21,6 +22,7 @@ mod vault;
 pub use crypto::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 pub use error::{Error, Result};
 pub use generator::{GeneratorOptions, generate_password};
+pub use hello::{generate_wrapping_key, protected_wrapping_key, sidecar_path};
 pub use import::{ImportFormat, ImportSummary, import_file};
 pub use model::{Field, Item, ItemKind, VaultData};
 pub use vault::{FORMAT_VERSION, MAGIC, Vault};

@@ -3,14 +3,18 @@
 //! Вся криптография и работа с файлом — в `vault-core`; здесь только UI,
 //! буфер обмена с автоочисткой и автоблокировка.
 
-use std::path::PathBuf;
+mod hello_win;
+
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use uuid::Uuid;
 use vault_core::{
-    Field, GeneratorOptions, ImportFormat, Item, ItemKind, Vault, generate_password, import_file,
+    Field, GeneratorOptions, ImportFormat, Item, ItemKind, Vault, generate_password,
+    generate_wrapping_key, import_file, protected_wrapping_key, sidecar_path,
 };
 use zeroize::Zeroize;
 
@@ -206,6 +210,8 @@ struct App {
     import_format: ImportFormat,
     import_result: Option<String>,
     theme: Theme,
+    /// Фоновый запрос Windows Hello; результат забирается в `tick`.
+    hello_pending: Option<Receiver<Result<Vault, String>>>,
 }
 
 impl App {
@@ -233,6 +239,7 @@ impl App {
             import_format: ImportFormat::Auto,
             import_result: None,
             theme,
+            hello_pending: None,
         }
     }
 
@@ -250,6 +257,7 @@ impl App {
         self.status = reason.to_string();
         self.import_open = false;
         self.import_result = None;
+        self.hello_pending = None;
     }
 
     fn copy(&mut self, text: &str, label: &str) {
@@ -267,6 +275,8 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
+        self.poll_hello_unlock();
+
         if let Some((at, secret)) = self.clipboard.clone()
             && at.elapsed() >= CLIPBOARD_TTL
         {
@@ -313,6 +323,7 @@ impl App {
                     Mode::Create => "Хранилище создано.".to_string(),
                 };
                 self.vault = Some(vault);
+                self.hello_pending = None;
                 self.password.zeroize();
                 self.confirm.zeroize();
                 self.mode = Mode::Open;
@@ -320,6 +331,72 @@ impl App {
                 self.error = None;
             }
             Err(err) => self.error = Some(err.to_string()),
+        }
+    }
+
+    /// Сайдкар Windows Hello для выбранного пути, если он существует.
+    fn hello_sidecar(&self) -> Option<PathBuf> {
+        let path = self.path.trim();
+        if path.is_empty() {
+            return None;
+        }
+        let sidecar = sidecar_path(Path::new(path));
+        sidecar.exists().then_some(sidecar)
+    }
+
+    /// Запускает вход через Hello в фоне: DPAPI, подтверждение и расшифровка
+    /// хранилища не должны подвешивать отрисовку.
+    fn start_hello_unlock(&mut self, ctx: &egui::Context) {
+        let path = PathBuf::from(self.path.trim());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Vault, String> {
+                // Сначала проверяем, что сайдкар читается, затем спрашиваем Hello
+                // и только после подтверждения снимаем защиту с ключа.
+                let blob = protected_wrapping_key(&path).map_err(|err| err.to_string())?;
+                hello_win::request_consent()?;
+                let wrapping = hello_win::dpapi_unprotect(&blob)?;
+                Vault::open_with_hello(&path, &wrapping).map_err(|err| err.to_string())
+            })();
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+
+        self.hello_pending = Some(receiver);
+        self.error = None;
+        self.status = "Ожидание подтверждения Windows Hello…".to_string();
+    }
+
+    /// Забирает результат фонового входа через Hello.
+    fn poll_hello_unlock(&mut self) {
+        let Some(receiver) = &self.hello_pending else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(vault)) => {
+                self.hello_pending = None;
+                self.vault = Some(vault);
+                self.password.zeroize();
+                self.confirm.zeroize();
+                self.mode = Mode::Open;
+                self.error = None;
+                self.last_activity = Instant::now();
+                self.status = "Хранилище открыто через Windows Hello.".to_string();
+            }
+            Ok(Err(err)) => {
+                self.hello_pending = None;
+                self.error = Some(format!("{err}. Введите мастер-пароль."));
+                self.status = "Вход через Windows Hello не удался.".to_string();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.hello_pending = None;
+                self.error = Some(
+                    "Поток Windows Hello завершился неожиданно. Введите мастер-пароль.".to_string(),
+                );
+            }
         }
     }
 
@@ -391,6 +468,21 @@ impl App {
                     }
                 });
 
+                if self.hello_pending.is_some() {
+                    ui.add_space(8.0);
+                    ui.label("Ожидание подтверждения Windows Hello…");
+                    ui.ctx().request_repaint_after(Duration::from_millis(200));
+                } else if self.hello_sidecar().is_some() {
+                    ui.add_space(8.0);
+                    if ui
+                        .button("Войти через Windows Hello")
+                        .on_hover_text("Разблокировка без мастер-пароля")
+                        .clicked()
+                    {
+                        self.start_hello_unlock(ui.ctx());
+                    }
+                }
+
                 if let Some(error) = &self.error {
                     ui.add_space(6.0);
                     ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
@@ -439,6 +531,43 @@ impl App {
                 if ui.button("Импорт…").clicked() {
                     self.import_open = true;
                     self.import_result = None;
+                }
+                let hello_on = sidecar_path(vault.path()).exists();
+                let hello_label = if hello_on {
+                    "Hello: включён"
+                } else {
+                    "Hello: выключен"
+                };
+                if ui
+                    .button(hello_label)
+                    .on_hover_text("Разблокировка без мастер-пароля через Windows Hello")
+                    .clicked()
+                {
+                    if hello_on {
+                        match vault.disable_hello() {
+                            Ok(()) => {
+                                self.status = "Вход через Windows Hello выключен.".to_string();
+                            }
+                            Err(err) => {
+                                self.status = format!("Не удалось выключить Hello: {err}");
+                            }
+                        }
+                    } else {
+                        let wrapping = generate_wrapping_key();
+                        match hello_win::dpapi_protect(&wrapping) {
+                            Ok(blob) => match vault.enable_hello(&wrapping, &blob) {
+                                Ok(()) => {
+                                    self.status = "Вход через Windows Hello включён. При следующем запуске мастер-пароль не понадобится.".to_string();
+                                }
+                                Err(err) => {
+                                    self.status = format!("Не удалось включить Hello: {err}");
+                                }
+                            },
+                            Err(err) => {
+                                self.status = format!("Не удалось защитить ключ: {err}");
+                            }
+                        }
+                    }
                 }
                 if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                     self.theme = self.theme.toggled();

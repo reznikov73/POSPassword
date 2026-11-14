@@ -6,6 +6,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
+use crate::hello::{self, HelloEnvelope};
 use crate::model::{Item, VaultData, now_secs};
 use crate::{Error, Result};
 
@@ -119,6 +120,9 @@ impl Vault {
             data: VaultData::default(),
         };
         vault.save()?;
+        // У пути мог остаться сайдкар от прежнего хранилища: он заворачивал
+        // другой ключ и больше не действителен.
+        let _ = remove_hello_sidecar(vault.path());
         Ok(vault)
     }
 
@@ -127,9 +131,35 @@ impl Vault {
         let path = path.into();
         let bytes = fs::read(&path)?;
         let header = Header::decode(&bytes)?;
-        let header_bytes = &bytes[..HEADER_LEN];
 
         let key = crypto::derive_key(password.as_bytes(), &header.salt, header.kdf)?;
+        Self::open_decrypted(path, key, header, &bytes)
+    }
+
+    /// Открывает хранилище ключом, развёрнутым из обёртки Windows Hello.
+    ///
+    /// `wrapping_key` — ключ обёртки, снятый приложением с DPAPI-защиты после
+    /// подтверждения присутствия пользователя (Windows Hello). Отсутствие
+    /// или повреждение сайдкара — ошибка: приложение откатывается на ввод
+    /// мастер-пароля.
+    pub fn open_with_hello(path: impl Into<PathBuf>, wrapping_key: &[u8; KEY_LEN]) -> Result<Self> {
+        let path = path.into();
+        let envelope = HelloEnvelope::read(&hello::sidecar_path(&path))?;
+        let key = envelope.open(wrapping_key)?;
+
+        let bytes = fs::read(&path)?;
+        let header = Header::decode(&bytes)?;
+        Self::open_decrypted(path, key, header, &bytes)
+    }
+
+    /// Общая часть `open` и `open_with_hello`: расшифровка и разбор данных.
+    fn open_decrypted(
+        path: PathBuf,
+        key: Zeroizing<[u8; KEY_LEN]>,
+        header: Header,
+        bytes: &[u8],
+    ) -> Result<Self> {
+        let header_bytes = &bytes[..HEADER_LEN];
         let plaintext = crypto::open(&key, &header.nonce, &bytes[HEADER_LEN..], header_bytes)?;
         let data: VaultData = serde_json::from_slice(&plaintext)?;
 
@@ -222,13 +252,32 @@ impl Vault {
     }
 
     /// Меняет мастер-пароль: новая соль, новый ключ, та же полезная нагрузка.
+    /// Обёртка Windows Hello заворачивала прежний ключ — сайдкар удаляется.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
         validate_master_password(new_password)?;
         let mut salt = [0u8; SALT_LEN];
         crypto::random_bytes(&mut salt);
         self.key = crypto::derive_key(new_password.as_bytes(), &salt, self.kdf)?;
         self.salt = salt;
-        self.save()
+        self.save()?;
+        remove_hello_sidecar(&self.path)
+    }
+
+    /// Включает разблокировку через Windows Hello: заворачивает ключ хранилища
+    /// и пишет сайдкар рядом с файлом.
+    ///
+    /// `wrapping_key` — свежий случайный ключ обёртки (`generate_wrapping_key`);
+    /// `dpapi_blob` — этот же ключ, защищённый приложением через DPAPI.
+    /// Ядро трактует блоб как непрозрачные данные.
+    pub fn enable_hello(&mut self, wrapping_key: &[u8; KEY_LEN], dpapi_blob: &[u8]) -> Result<()> {
+        let envelope = HelloEnvelope::seal(&self.key, wrapping_key, dpapi_blob.to_vec());
+        envelope.write(&hello::sidecar_path(&self.path))
+    }
+
+    /// Выключает разблокировку через Windows Hello: удаляет сайдкар.
+    /// Отсутствие сайдкара не ошибка.
+    pub fn disable_hello(&mut self) -> Result<()> {
+        remove_hello_sidecar(&self.path)
     }
 
     /// Перешифровывает и записывает файл. Nonce всегда новый.
@@ -276,7 +325,7 @@ fn validate_master_password(password: &str) -> Result<()> {
 
 /// Пишет файл через временный файл и переименование, чтобы обрыв записи
 /// не оставил наполовину записанное хранилище.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -289,4 +338,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| Error::Io(e.error))?;
     Ok(())
+}
+
+/// Удаляет сайдкар Windows Hello, если он существует.
+fn remove_hello_sidecar(vault_path: &Path) -> Result<()> {
+    match fs::remove_file(hello::sidecar_path(vault_path)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }

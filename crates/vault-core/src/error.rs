@@ -23,6 +23,9 @@ pub enum Error {
     #[error("ошибка шифрования: {0}")]
     Crypto(String),
 
+    #[error("обёртка Windows Hello повреждена или ключ обёртки не подходит")]
+    HelloUnwrapFailed,
+
     #[error("ошибка сериализации: {0}")]
     Serialization(#[from] serde_json::Error),
 
