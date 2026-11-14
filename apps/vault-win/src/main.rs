@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autotype;
+mod filedialog;
 mod hello_win;
 mod help;
 
@@ -1112,6 +1113,35 @@ impl App {
                             .hint_text("C:\\Users\\...\\bitwarden_export.json")
                             .desired_width(f32::INFINITY),
                     );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Выбрать файл…").clicked()
+                            && let Some(path) = filedialog::pick_file()
+                        {
+                            self.import_path = path.display().to_string();
+                        }
+                        if ui
+                            .button("Вставить путь")
+                            .on_hover_text(
+                                "Взять файл, скопированный в Проводнике, или текст пути из буфера",
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = filedialog::clipboard_file() {
+                                self.import_path = path.display().to_string();
+                            } else if let Some(text) = filedialog::clipboard_text() {
+                                self.import_path = text;
+                            } else {
+                                self.import_result =
+                                    Some("В буфере нет ни файла, ни пути.".to_string());
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new("или перетащите файл в окно")
+                                .weak()
+                                .small(),
+                        );
+                    });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label("Формат:");
@@ -1370,6 +1400,17 @@ impl App {
                         .hint_text("C:\\Users\\...\\hranitel-export.json")
                         .desired_width(f32::INFINITY),
                 );
+                ui.add_space(4.0);
+                if ui.button("Куда сохранить…").clicked() {
+                    let suggested = if self.export_path.trim().is_empty() {
+                        default_export_path(vault.path(), self.export_format)
+                    } else {
+                        self.export_path.trim().to_string()
+                    };
+                    if let Some(path) = filedialog::save_file(&suggested) {
+                        self.export_path = path.display().to_string();
+                    }
+                }
                 if !self.export_path.trim().is_empty()
                     && Path::new(self.export_path.trim()).exists()
                 {
@@ -1588,6 +1629,21 @@ impl eframe::App for App {
             }
             self.status = message.clone();
             self.autotype_notice = Some((message, Instant::now()));
+        }
+
+        // Файл, перетащенный в окно, сразу открывает диалог импорта.
+        let dropped = ui.ctx().input(|input| {
+            input
+                .raw
+                .dropped_files
+                .first()
+                .map(|file| file.path().to_path_buf())
+        });
+        if let Some(path) = dropped {
+            self.import_path = path.display().to_string();
+            self.import_open = true;
+            self.import_result = None;
+            self.status = format!("Файл для импорта: {}", path.display());
         }
         if self.vault.is_some()
             && ui
