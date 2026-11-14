@@ -3,7 +3,7 @@
 Документ для агента, который продолжит работу. Всё, что нужно знать, чтобы
 собрать, проверить и не наступить на уже пройденные грабли.
 
-Дата: 14 ноября 2026. Версия: **0.3.0**.
+Дата: 14 ноября 2026. Версия: **0.4.0**.
 
 ## 1. Что это
 
@@ -12,13 +12,13 @@
 
 Расположение: `E:\Work\VSC\POSPassword`
 Репозиторий: https://github.com/reznikov73/POSPassword (приватный, ветка `main`)
-Последний коммит на момент передачи: `090a8f4`
+Последний коммит на момент передачи: `b20ef4c`
 
 ## 2. Быстрый старт
 
 ```powershell
 cd E:\Work\VSC\POSPassword
-cargo test --workspace                       # 42 теста, все должны пройти
+cargo test --workspace                       # 44 теста, все должны пройти
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release -p vault-win
 .\target\release\vault-win.exe
@@ -34,7 +34,7 @@ crates/vault-core   формат файла, криптография, моде�
                     обёртка ключа для Windows Hello
 crates/vault-cli    CLI: init, add, list, show, passwd, gen, import
 apps/vault-win      egui-клиент: вход, список, карточка, импорт, темы, автоблокировка, буфер;
-                    hello_win.rs — DPAPI и UserConsentVerifier
+                    hello_win.rs — DPAPI и UserConsentVerifier, help.rs — справка по F1
 docs/               архитектура, категории данных, инструкции, этот файл
 ```
 
@@ -93,12 +93,14 @@ Field { label: String, value: String, sensitive: bool }
 - Светлая и тёмная тема, выбор сохраняется в `%APPDATA%\Hranitel\settings.txt`.
 - Вход через Windows Hello: обёртка ключа + DPAPI + подтверждение присутствия;
   кнопки «Войти через Windows Hello» и «Hello: включён/выключен».
+- Встроенная справка: F1 в любом месте окна, 16 разделов по всем функциям;
+  кнопки «Справка (F1)» на экране входа и в тулбаре.
 - CLI со всеми операциями.
-- 42 теста: ядро (15), обёртка Hello (10), импорт (9), шаблоны (6), DPAPI (2).
+- 44 теста: ядро (15), обёртка Hello (10), импорт (9), шаблоны (6), DPAPI (2), справка (2).
 
 ## 5. Проверочный чек-лист
 
-1. `cargo test --workspace` → 42 passed, 0 failed.
+1. `cargo test --workspace` → 44 passed, 0 failed.
 2. `cargo clippy --workspace --all-targets -- -D warnings` → без предупреждений.
 3. Запустить `vault-win.exe` → светлая тема, экран входа, кнопка «Тема: светлая».
 4. Создать хранилище (пароль от 8 символов) → основной экран, «Записей: 0».
@@ -116,6 +118,8 @@ Field { label: String, value: String, sensitive: bool }
     вход по паролю работает.
 14. Сменить мастер-пароль через CLI → сайдкар исчез, вход через Hello недоступен,
     пока опция не включена заново.
+15. В любом месте окна нажать F1 → открылась справка со всеми разделами; повторный
+    F1, Esc и крестик закрывают её. То же — кнопкой «Справка (F1)» на входе и в тулбаре.
 
 ## 6. Грабли (проверено на практике)
 
@@ -126,6 +130,8 @@ Field { label: String, value: String, sensitive: bool }
   фиксированная область контента + строка статуса.
 - `clear_color` надо переопределять, иначе eframe заливает окно чёрным и светлая тема «не работает».
 - Два `ScrollArea` без `id_salt` дают предупреждение о дублирующемся ID.
+- Headless-тест кадра: `ctx.run_ui(...)` возвращает `FullOutput`, у которого нужно
+  вызвать `textures_delta.clear()`, иначе epaint срабатывает на debug_assert при Drop.
 
 **Крейты**
 - `argon2 0.6`: `Params::new(m, t, p, Some(32))`, `hash_password_into`.
