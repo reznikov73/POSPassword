@@ -3,7 +3,9 @@
 //! Поддерживаются:
 //! - Bitwarden: экспорт `.json` (незашифрованный) и `.csv`;
 //! - 1Password: `.csv`;
-//! - обычный CSV с колонками name/url/username/password.
+//! - обычный CSV с колонками name/url/username/password;
+//! - Яндекс Браузер: `.csv` с колонками url/username/password/comment/tags
+//!   (название берётся из адреса сайта).
 //!
 //! Импорт никогда не перезаписывает существующие записи: совпадения по названию
 //! и логину (или номеру карты) считаются дубликатами и пропускаются.
@@ -24,6 +26,7 @@ pub enum ImportFormat {
     BitwardenJson,
     BitwardenCsv,
     OnePasswordCsv,
+    YandexCsv,
     GenericCsv,
 }
 
@@ -34,16 +37,18 @@ impl ImportFormat {
             ImportFormat::BitwardenJson => "Bitwarden (JSON)",
             ImportFormat::BitwardenCsv => "Bitwarden (CSV)",
             ImportFormat::OnePasswordCsv => "1Password (CSV)",
+            ImportFormat::YandexCsv => "Яндекс Браузер (CSV)",
             ImportFormat::GenericCsv => "Обычный CSV",
         }
     }
 
-    pub fn all() -> [ImportFormat; 5] {
+    pub fn all() -> [ImportFormat; 6] {
         [
             ImportFormat::Auto,
             ImportFormat::BitwardenJson,
             ImportFormat::BitwardenCsv,
             ImportFormat::OnePasswordCsv,
+            ImportFormat::YandexCsv,
             ImportFormat::GenericCsv,
         ]
     }
@@ -75,6 +80,7 @@ pub fn import_file(
         ImportFormat::BitwardenJson => parse_bitwarden_json(&data)?,
         ImportFormat::BitwardenCsv => parse_csv_like(&data, CsvFlavor::Bitwarden)?,
         ImportFormat::OnePasswordCsv => parse_csv_like(&data, CsvFlavor::OnePassword)?,
+        ImportFormat::YandexCsv => parse_csv_like(&data, CsvFlavor::Yandex)?,
         ImportFormat::GenericCsv => parse_csv_like(&data, CsvFlavor::Generic)?,
         ImportFormat::Auto => unreachable!("формат определён выше"),
     };
@@ -143,6 +149,12 @@ fn detect_format(path: &Path, data: &[u8]) -> Result<ImportFormat> {
                 Ok(ImportFormat::BitwardenCsv)
             } else if header.contains("title") && header.contains("username") {
                 Ok(ImportFormat::OnePasswordCsv)
+            } else if header.contains("url")
+                && header.contains("username")
+                && header.contains("password")
+                && header.contains("comment")
+            {
+                Ok(ImportFormat::YandexCsv)
             } else if header.contains("name") || header.contains("url") {
                 Ok(ImportFormat::GenericCsv)
             } else {
@@ -331,6 +343,7 @@ fn expiry_string(month: &str, year: &str) -> String {
 enum CsvFlavor {
     Bitwarden,
     OnePassword,
+    Yandex,
     Generic,
 }
 
@@ -418,6 +431,35 @@ fn parse_csv_like(data: &[u8], flavor: CsvFlavor) -> Result<Parsed> {
                 }
                 parsed.items.push(item);
             }
+            CsvFlavor::Yandex => {
+                let url = get("url");
+                let username = get("username");
+                let password = get("password");
+                if url.is_empty() && username.is_empty() && password.is_empty() {
+                    parsed.unsupported += 1;
+                    continue;
+                }
+                // В выгрузке Яндекса нет колонки с названием — берём имя сайта.
+                let title = first_non_empty(&[title_from_url(&url), username.clone()]);
+                if title.is_empty() {
+                    parsed.unsupported += 1;
+                    continue;
+                }
+                let mut item = Item::new(ItemKind::Login, title);
+                item.username = username;
+                item.password = password;
+                item.url = url;
+                item.notes = get("comment");
+                let tags = get("tags");
+                if !tags.is_empty() {
+                    item.tags = tags
+                        .split([',', ';'])
+                        .map(|tag| tag.trim().to_string())
+                        .filter(|tag| !tag.is_empty())
+                        .collect();
+                }
+                parsed.items.push(item);
+            }
             CsvFlavor::OnePassword => {
                 let title = get("title");
                 if title.is_empty() {
@@ -469,9 +511,24 @@ fn parse_csv_like(data: &[u8], flavor: CsvFlavor) -> Result<Parsed> {
 fn first_non_empty(values: &[String]) -> String {
     values
         .iter()
-        .find(|v| !v.is_empty())
+        .find(|value| !value.is_empty())
         .cloned()
         .unwrap_or_default()
+}
+
+/// Название записи из адреса: «https://www.mail.ru/inbox» → «mail.ru».
+fn title_from_url(url: &str) -> String {
+    let mut rest = url.trim();
+    if let Some((_, tail)) = rest.split_once("://") {
+        rest = tail;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    host.trim_start_matches("www.")
+        .trim_end_matches('.')
+        .trim()
+        .to_string()
 }
 
 /// CSV из Windows часто в UTF-8 с BOM или в UTF-16 (такое делает Excel).

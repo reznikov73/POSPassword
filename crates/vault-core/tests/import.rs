@@ -209,3 +209,56 @@ fn sensitive_fields_are_masked_on_drop() {
     let plain = Field::new("Банк", "Тинькофф");
     assert!(!plain.sensitive);
 }
+
+#[test]
+fn yandex_csv_is_imported() {
+    let (dir, mut vault) = setup();
+    let csv = "\u{feff}url,username,password,comment,tags\r\n\
+https://www.yandex.ru/,user1,pass1,заметка,работа\r\n\
+https://mail.yandex.ru/inbox,user2,pass2,,\r\n\
+https://github.com/login,user1,pass1,,\r\n";
+    let path = dir.path().join("yandex.csv");
+    fs::write(&path, csv).expect("запись файла");
+
+    let summary = import_file(&mut vault, &path, ImportFormat::Auto).expect("импорт");
+    assert_eq!(summary.added, 3);
+    assert_eq!(summary.unsupported, 0);
+
+    let titles: Vec<String> = vault
+        .items()
+        .iter()
+        .map(|item| item.title.clone())
+        .collect();
+    assert!(titles.contains(&"yandex.ru".to_string()));
+    assert!(titles.contains(&"mail.yandex.ru".to_string()));
+    assert!(titles.contains(&"github.com".to_string()));
+
+    let yandex = vault
+        .items()
+        .iter()
+        .find(|item| item.title == "yandex.ru")
+        .expect("запись Яндекса");
+    assert_eq!(yandex.kind, ItemKind::Login);
+    assert_eq!(yandex.username, "user1");
+    assert_eq!(yandex.password, "pass1");
+    assert_eq!(yandex.notes, "заметка");
+    assert_eq!(yandex.tags, vec!["работа"]);
+}
+
+#[test]
+fn yandex_csv_skips_duplicates_and_empty_rows() {
+    let (dir, mut vault) = setup();
+    let csv = "url,username,password,comment,tags\r\n\
+https://example.com/login,user,pass,,\r\n\
+,,,,\r\n";
+    let path = dir.path().join("yandex.csv");
+    fs::write(&path, csv).expect("запись файла");
+
+    let first = import_file(&mut vault, &path, ImportFormat::YandexCsv).expect("импорт");
+    assert_eq!(first.added, 1);
+    assert_eq!(first.unsupported, 1);
+
+    let second = import_file(&mut vault, &path, ImportFormat::YandexCsv).expect("повторный импорт");
+    assert_eq!(second.added, 0);
+    assert_eq!(second.duplicates, 1);
+}
