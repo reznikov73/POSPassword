@@ -4,6 +4,7 @@
 //! буфер обмена с автоочисткой и автоблокировка.
 
 mod hello_win;
+mod help;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -212,6 +213,8 @@ struct App {
     theme: Theme,
     /// Фоновый запрос Windows Hello; результат забирается в `tick`.
     hello_pending: Option<Receiver<Result<Vault, String>>>,
+    /// Окно встроенной справки, открывается по F1.
+    help_open: bool,
 }
 
 impl App {
@@ -240,6 +243,7 @@ impl App {
             import_result: None,
             theme,
             hello_pending: None,
+            help_open: false,
         }
     }
 
@@ -507,6 +511,9 @@ impl App {
                 self.theme.apply(ui.ctx());
                 save_theme(self.theme);
             }
+            if ui.small_button("Справка (F1)").clicked() {
+                self.help_open = true;
+            }
         });
     }
 
@@ -573,6 +580,9 @@ impl App {
                     self.theme = self.theme.toggled();
                     self.theme.apply(ui.ctx());
                     save_theme(self.theme);
+                }
+                if ui.button("Справка (F1)").clicked() {
+                    self.help_open = true;
                 }
                 ui.label(format!("Записей: {}", vault.items().len()));
             });
@@ -921,6 +931,14 @@ impl eframe::App for App {
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
 
+        // F1 открывает и закрывает встроенную справку в любом месте программы.
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1))
+        {
+            self.help_open = !self.help_open;
+        }
+
         let status_height = 34.0;
         let content_height = (ui.available_height() - status_height).max(0.0);
 
@@ -953,6 +971,8 @@ impl eframe::App for App {
                 });
             }
         });
+
+        help::show(ui.ctx(), &mut self.help_open);
     }
 }
 
