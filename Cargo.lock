@@ -2027,7 +2027,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "login-probe"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "eframe",
 ]
@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "vault-cli"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "rpassword",
  "vault-core",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3822,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "vault-win"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "arboard",
  "eframe",

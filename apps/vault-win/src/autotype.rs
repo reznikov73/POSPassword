@@ -101,7 +101,7 @@ pub fn start(ctx: egui::Context) -> Result<(), String> {
 
     match receiver.recv() {
         Ok(true) => Ok(()),
-        Ok(false) => Err("клавиши Ctrl+Alt+A заняты другой программой".to_string()),
+        Ok(false) => Err("клавиши Ctrl+Alt+A заняты другой программой (возможно, уже запущен другой «Хранитель»)".to_string()),
         Err(_) => Err("не удалось запустить поток горячей клавиши".to_string()),
     }
 }

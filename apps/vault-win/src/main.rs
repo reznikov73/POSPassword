@@ -30,6 +30,23 @@ const AUTO_LOCK: Duration = Duration::from_secs(5 * 60);
 const CLIPBOARD_TTL: Duration = Duration::from_secs(30);
 
 fn main() -> eframe::Result {
+    // Один экземпляр: два окна путают автоввод — горячую клавишу держит только одно.
+    if other_instance_running() {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+            use windows::core::w;
+            MessageBoxW(
+                None,
+                w!(
+                    "«Хранитель» уже запущен в другом окне.\n\nЗакройте старое окно и запустите это снова — иначе автоввод (Ctrl+Alt+A) будет работать из старого экземпляра."
+                ),
+                w!("Хранитель"),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+        std::process::exit(0);
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1020.0, 680.0])
@@ -42,6 +59,37 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// Хэндл мьютекса текущего экземпляра. Нужен только чтобы не закрывать его.
+static INSTANCE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Пытается взять именованный мьютекс. `true` — другой экземпляр уже работает.
+fn other_instance_running() -> bool {
+    use windows::Win32::Foundation::{
+        ERROR_ALREADY_EXISTS, GetLastError, SetLastError, WIN32_ERROR,
+    };
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::w;
+
+    // SAFETY: имя — статическая строка, атрибуты не нужны.
+    unsafe {
+        // Код последней ошибки может быть сталым от прошлых вызовов.
+        SetLastError(WIN32_ERROR(0));
+        match CreateMutexW(None, true, w!("Hranitel.SingleInstance")) {
+            Ok(handle) => {
+                if GetLastError() == ERROR_ALREADY_EXISTS {
+                    true
+                } else {
+                    // Хэндл нигде не закрываем: он живёт до конца процесса
+                    // и держит мьютекс всё время работы.
+                    INSTANCE.store(handle.0 as isize, std::sync::atomic::Ordering::Relaxed);
+                    false
+                }
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
