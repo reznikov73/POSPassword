@@ -14,7 +14,7 @@ try {
         $Version = $line.Matches[0].Groups[1].Value
     }
 
-    cargo build --release -p vault-win -p vault-cli -p login-probe
+    cargo build --release -p vault-win -p vault-cli -p login-probe -p browser-host
     if ($LASTEXITCODE -ne 0) { throw 'сборка не удалась' }
 
     $dst = Join-Path 'dist' "Hranitel-$Version-win64"
@@ -28,6 +28,11 @@ try {
     $tools = Join-Path $dst 'tools'
     New-Item -ItemType Directory $tools -Force | Out-Null
     Copy-Item 'target\release\login-probe.exe', 'tools\login-probe\README.md' $tools
+
+    # Мост к браузеру: родной хост и распакованное расширение.
+    Copy-Item 'target\release\browser-host.exe' $dst
+    Copy-Item 'tools\install-browser-host.ps1' $tools
+    Copy-Item 'extension' $dst -Recurse
 
     $zip = Join-Path 'dist' "Hranitel-$Version-win64.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }

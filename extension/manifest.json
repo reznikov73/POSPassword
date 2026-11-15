@@ -3,7 +3,6 @@
   "name": "Хранитель — пароли",
   "version": "0.10.0",
   "description": "Автозаполнение логинов и паролей из локального хранилища «Хранитель». Пароли не хранятся в браузере.",
-  "default_locale": "ru",
   "permissions": ["nativeMessaging", "storage", "activeTab"],
   "host_permissions": ["<all_urls>"],
   "background": {

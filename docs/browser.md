@@ -69,7 +69,10 @@ JSON. Действия — kebab-case.
 
 ## Установка (Chrome / Edge)
 
-1. Соберите хост: `cargo build --release -p browser-host`.
+1. Соберите хост: `cargo build --release -p browser-host` (в готовом
+   пакете `dist\Hranitel-<версия>-win64` уже лежат `browser-host.exe`,
+   папка `extension` и `tools\install-browser-host.ps1` — собирать ничего
+   не нужно).
 2. Загрузите распакованное расширение: `chrome://extensions` →
    «Режим разработчика» → «Загрузить распакованное расширение» → папка
    `extension`. Скопируйте идентификатор (32 буквы).
