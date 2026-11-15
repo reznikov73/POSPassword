@@ -97,23 +97,63 @@ fn settings_path() -> PathBuf {
     app_dir().join("settings.txt")
 }
 
-fn load_theme() -> Theme {
-    match std::fs::read_to_string(settings_path()) {
-        Ok(text) if text.trim() == "dark" => Theme::Dark,
-        _ => Theme::Light,
+/// Настройки из settings.txt: тема и путь к последнему открытому хранилищу.
+/// Старый формат файла — одна строка «light»/«dark» — понимается как тема.
+fn load_settings() -> (Theme, Option<String>) {
+    let text = std::fs::read_to_string(settings_path()).unwrap_or_default();
+    let mut theme = Theme::Light;
+    let mut vault: Option<String> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "dark" || line == "light" {
+            theme = if line == "dark" {
+                Theme::Dark
+            } else {
+                Theme::Light
+            };
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "theme" => {
+                theme = if value.trim() == "dark" {
+                    Theme::Dark
+                } else {
+                    Theme::Light
+                };
+            }
+            "vault" => {
+                let value = value.trim();
+                if !value.is_empty() {
+                    vault = Some(value.to_string());
+                }
+            }
+            _ => {}
+        }
     }
+
+    (theme, vault)
 }
 
-fn save_theme(theme: Theme) {
+/// Сохраняет настройки. Путь пишется, только если хранилище хоть раз открывали:
+/// путь из поля ввода не должен попадать в настройки, если открыть не удалось.
+fn save_settings(theme: Theme, vault: Option<&str>) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let value = match theme {
+    let theme_value = match theme {
         Theme::Light => "light",
         Theme::Dark => "dark",
     };
-    let _ = std::fs::write(dir.join("settings.txt"), value);
+    let mut text = format!("theme={theme_value}\n");
+    if let Some(vault) = vault {
+        text.push_str(&format!("vault={vault}\n"));
+    }
+    let _ = std::fs::write(dir.join("settings.txt"), text);
 }
 
 struct Draft {
@@ -189,6 +229,8 @@ enum DraftOutcome {
 struct App {
     mode: Mode,
     path: String,
+    /// Путь к последнему успешно открытому хранилищу; подставляется при старте.
+    last_vault: Option<String>,
     password: String,
     confirm: String,
     vault: Option<Vault>,
@@ -210,12 +252,13 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let theme = load_theme();
+        let (theme, last_vault) = load_settings();
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
         Self {
             mode: Mode::Open,
-            path: default_vault_path(),
+            path: last_vault.clone().unwrap_or_else(default_vault_path),
+            last_vault,
             password: String::new(),
             confirm: String::new(),
             vault: None,
@@ -312,6 +355,8 @@ impl App {
                     Mode::Open => "Хранилище открыто.".to_string(),
                     Mode::Create => "Хранилище создано.".to_string(),
                 };
+                self.last_vault = Some(self.path.trim().to_string());
+                save_settings(self.theme, self.last_vault.as_deref());
                 self.vault = Some(vault);
                 self.password.zeroize();
                 self.confirm.zeroize();
@@ -413,7 +458,7 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_theme(self.theme);
+                save_settings(self.theme, self.last_vault.as_deref());
             }
         });
     }
@@ -443,7 +488,7 @@ impl App {
                 if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                     self.theme = self.theme.toggled();
                     self.theme.apply(ui.ctx());
-                    save_theme(self.theme);
+                    save_settings(self.theme, self.last_vault.as_deref());
                 }
                 ui.label(format!("Записей: {}", vault.items().len()));
             });
