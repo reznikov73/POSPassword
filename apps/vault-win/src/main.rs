@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
             MessageBoxW(
                 None,
                 w!(
-                    "«Хранитель» уже запущен в другом окне.\n\nЗакройте старое окно и запустите это снова — иначе автоввод (Ctrl+Alt+A) будет работать из старого экземпляра."
+                    "«Хранитель» уже запущен в другом окне.\n\nЗакройте старое окно и запустите это снова — иначе автоввод будет работать из старого экземпляра."
                 ),
                 w!("Хранитель"),
                 MB_OK | MB_ICONINFORMATION,
@@ -134,46 +134,225 @@ impl Theme {
 }
 
 fn theme_visuals(light: bool) -> egui::Visuals {
-    if light {
-        let mut visuals = egui::Visuals::light();
-        visuals.panel_fill = egui::Color32::from_rgb(244, 245, 247);
-        visuals.window_fill = egui::Color32::from_rgb(255, 255, 255);
-        visuals.faint_bg_color = egui::Color32::from_rgb(235, 238, 242);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(178, 205, 245);
-        visuals.selection.stroke.color = egui::Color32::from_rgb(20, 30, 50);
-        visuals
+    let mut visuals = if light {
+        egui::Visuals::light()
     } else {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(24, 26, 31);
-        visuals.window_fill = egui::Color32::from_rgb(31, 34, 40);
-        visuals.faint_bg_color = egui::Color32::from_rgb(38, 41, 48);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(17, 19, 23);
-        visuals
+        egui::Visuals::dark()
+    };
+
+    // Контрастная тема: почти чёрный текст, заметные рамки у полей и кнопок.
+    if light {
+        let text = egui::Color32::from_rgb(16, 18, 22);
+        let border = egui::Color32::from_rgb(118, 128, 143);
+        let accent = egui::Color32::from_rgb(38, 92, 180);
+        let panel = egui::Color32::from_rgb(236, 239, 244);
+
+        visuals.override_text_color = Some(text);
+        visuals.panel_fill = panel;
+        visuals.window_fill = egui::Color32::WHITE;
+        visuals.faint_bg_color = egui::Color32::from_rgb(226, 231, 238);
+        visuals.extreme_bg_color = egui::Color32::WHITE;
+        visuals.window_stroke = egui::Stroke::new(1.0, border);
+        visuals.window_corner_radius = egui::CornerRadius::same(10);
+        visuals.selection.bg_fill = accent;
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+        visuals.widgets.noninteractive.bg_fill = panel;
+        visuals.widgets.noninteractive.weak_bg_fill = panel;
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+
+        visuals.widgets.inactive.bg_fill = egui::Color32::WHITE;
+        visuals.widgets.inactive.weak_bg_fill = egui::Color32::WHITE;
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(219, 231, 250);
+        visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(228, 238, 252);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, accent);
+
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(200, 218, 245);
+        visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(210, 226, 248);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, accent);
+
+        visuals.widgets.open.bg_fill = egui::Color32::WHITE;
+        visuals.widgets.open.weak_bg_fill = egui::Color32::WHITE;
+        visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, accent);
+    } else {
+        let text = egui::Color32::from_rgb(235, 238, 244);
+        let border = egui::Color32::from_rgb(96, 106, 122);
+        let accent = egui::Color32::from_rgb(104, 156, 240);
+        let panel = egui::Color32::from_rgb(27, 30, 36);
+
+        visuals.override_text_color = Some(text);
+        visuals.panel_fill = panel;
+        visuals.window_fill = egui::Color32::from_rgb(33, 37, 44);
+        visuals.faint_bg_color = egui::Color32::from_rgb(40, 44, 52);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(19, 22, 27);
+        visuals.window_stroke = egui::Stroke::new(1.0, border);
+        visuals.window_corner_radius = egui::CornerRadius::same(10);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(52, 92, 156);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+        visuals.widgets.noninteractive.bg_fill = panel;
+        visuals.widgets.noninteractive.weak_bg_fill = panel;
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(42, 47, 56);
+        visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(42, 47, 56);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(54, 62, 76);
+        visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(54, 62, 76);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, accent);
+
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(62, 74, 92);
+        visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(62, 74, 92);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, accent);
+
+        visuals.widgets.open.bg_fill = egui::Color32::from_rgb(42, 47, 56);
+        visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(42, 47, 56);
+        visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, accent);
     }
+    visuals
 }
 
 fn settings_path() -> PathBuf {
     app_dir().join("settings.txt")
 }
 
-fn load_theme() -> Theme {
-    match std::fs::read_to_string(settings_path()) {
-        Ok(text) if text.trim() == "dark" => Theme::Dark,
-        _ => Theme::Light,
-    }
+/// Настройки программы: тема и сочетание клавиш автоввода.
+#[derive(Clone, Copy)]
+struct Settings {
+    theme: Theme,
+    hotkey: autotype::Hotkey,
 }
 
-fn save_theme(theme: Theme) {
+fn load_settings() -> Settings {
+    let mut settings = Settings {
+        theme: Theme::Light,
+        hotkey: autotype::Hotkey::default(),
+    };
+    let Ok(text) = std::fs::read_to_string(settings_path()) else {
+        return settings;
+    };
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line == "dark" {
+            settings.theme = Theme::Dark;
+            continue;
+        }
+        if line == "light" {
+            settings.theme = Theme::Light;
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        match name.trim() {
+            "theme" => {
+                settings.theme = if value.trim() == "dark" {
+                    Theme::Dark
+                } else {
+                    Theme::Light
+                };
+            }
+            "hotkey" => {
+                if let Ok(hotkey) = autotype::Hotkey::parse(value.trim()) {
+                    settings.hotkey = hotkey;
+                }
+            }
+            _ => {}
+        }
+    }
+    settings
+}
+
+fn save_settings(theme: Theme, hotkey: autotype::Hotkey) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let value = match theme {
+    let theme_value = match theme {
         Theme::Light => "light",
         Theme::Dark => "dark",
     };
-    let _ = std::fs::write(dir.join("settings.txt"), value);
+    let text = format!(
+        "theme={theme_value}\nhotkey={}\n",
+        hotkey.label().to_lowercase()
+    );
+    let _ = std::fs::write(dir.join("settings.txt"), text);
+}
+
+/// Категория для фильтра списка.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KindGroup {
+    All,
+    Logins,
+    Cards,
+    Accounts,
+    Notes,
+    Documents,
+    Keys,
+}
+
+impl KindGroup {
+    fn all() -> [KindGroup; 7] {
+        [
+            KindGroup::All,
+            KindGroup::Logins,
+            KindGroup::Cards,
+            KindGroup::Accounts,
+            KindGroup::Notes,
+            KindGroup::Documents,
+            KindGroup::Keys,
+        ]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            KindGroup::All => "Все",
+            KindGroup::Logins => "Логины",
+            KindGroup::Cards => "Карты",
+            KindGroup::Accounts => "Счета",
+            KindGroup::Notes => "Заметки",
+            KindGroup::Documents => "Документы",
+            KindGroup::Keys => "Ключи",
+        }
+    }
+
+    fn matches(self, kind: ItemKind) -> bool {
+        self == KindGroup::All || group_of(kind) == self
+    }
+}
+
+fn group_of(kind: ItemKind) -> KindGroup {
+    match kind {
+        ItemKind::Login => KindGroup::Logins,
+        ItemKind::Card => KindGroup::Cards,
+        ItemKind::BankAccount => KindGroup::Accounts,
+        ItemKind::SecureNote => KindGroup::Notes,
+        ItemKind::ApiKey | ItemKind::Wifi | ItemKind::Pin | ItemKind::DigitalSignature => {
+            KindGroup::Keys
+        }
+        ItemKind::Passport
+        | ItemKind::ForeignPassport
+        | ItemKind::Snils
+        | ItemKind::Inn
+        | ItemKind::DriverLicense
+        | ItemKind::MedicalPolicy
+        | ItemKind::Insurance
+        | ItemKind::Property
+        | ItemKind::Health
+        | ItemKind::Vehicle => KindGroup::Documents,
+    }
 }
 
 struct Draft {
@@ -292,16 +471,26 @@ struct App {
     autotype_countdown: Option<Instant>,
     /// Сообщение автоввода на несколько секунд поверх окна.
     autotype_notice: Option<(String, Instant)>,
+    /// Сочетание клавиш автоввода.
+    hotkey: autotype::Hotkey,
+    /// Диалог настроек.
+    settings_open: bool,
+    hotkey_draft: String,
+    hotkey_error: Option<String>,
+    /// Фильтр списка по категории.
+    kind_filter: KindGroup,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let theme = load_theme();
+        let settings = load_settings();
+        let theme = settings.theme;
+        let hotkey = settings.hotkey;
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
 
         // Горячая клавиша автоввода живёт, пока запущено приложение.
-        let (autotype_ready, status) = match autotype::start(cc.egui_ctx.clone()) {
+        let (autotype_ready, status) = match autotype::start(cc.egui_ctx.clone(), hotkey) {
             Ok(()) => (
                 true,
                 "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
@@ -309,7 +498,8 @@ impl App {
             Err(err) => (
                 false,
                 format!(
-                    "Автоввод (Ctrl+Alt+A) недоступен: {err}. Введите мастер-пароль, чтобы открыть хранилище."
+                    "Автоввод ({}) недоступен: {err}. Смените комбинацию в настройках. Введите мастер-пароль, чтобы открыть хранилище.",
+                    hotkey.label()
                 ),
             ),
         };
@@ -350,6 +540,11 @@ impl App {
             autotype_ready,
             autotype_countdown: None,
             autotype_notice: None,
+            hotkey,
+            settings_open: false,
+            hotkey_draft: hotkey.label(),
+            hotkey_error: None,
+            kind_filter: KindGroup::All,
         }
     }
 
@@ -693,10 +888,15 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_theme(self.theme);
+                save_settings(self.theme, self.hotkey);
             }
             if ui.small_button("Справка (F1)").clicked() {
                 self.help_open = true;
+            }
+            if ui.small_button("Настройки").clicked() {
+                self.settings_open = true;
+                self.hotkey_draft = self.hotkey.label();
+                self.hotkey_error = None;
             }
         });
     }
@@ -805,10 +1005,15 @@ impl App {
                 if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                     self.theme = self.theme.toggled();
                     self.theme.apply(ui.ctx());
-                    save_theme(self.theme);
+                    save_settings(self.theme, self.hotkey);
                 }
                 if ui.button("Справка").clicked() {
                     self.help_open = true;
+                }
+                if ui.button("Настройки").clicked() {
+                    self.settings_open = true;
+                    self.hotkey_draft = self.hotkey.label();
+                    self.hotkey_error = None;
                 }
             });
         });
@@ -835,9 +1040,38 @@ impl App {
                     });
                     ui.add_space(6.0);
 
+                    // Категории: как вкладки над списком, с количеством записей.
+                    let totals: Vec<(KindGroup, usize)> = KindGroup::all()
+                        .iter()
+                        .map(|group| {
+                            let count = vault
+                                .items()
+                                .iter()
+                                .filter(|item| group.matches(item.kind))
+                                .count();
+                            (*group, count)
+                        })
+                        .collect();
+                    ui.horizontal_wrapped(|ui| {
+                        for (group, count) in totals {
+                            let label = format!("{} {count}", group.label());
+                            if ui
+                                .selectable_label(
+                                    self.kind_filter == group,
+                                    egui::RichText::new(label).small(),
+                                )
+                                .clicked()
+                            {
+                                self.kind_filter = group;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+
                     let items: Vec<(Uuid, String, String, ItemKind)> = vault
                         .search(&self.query)
                         .into_iter()
+                        .filter(|item| self.kind_filter.matches(item.kind))
                         .map(|i| (i.id, i.title.clone(), i.username.clone(), i.kind))
                         .collect();
 
@@ -1244,6 +1478,76 @@ impl App {
             self.lock("Заблокировано.");
         } else {
             self.vault = Some(vault);
+        }
+    }
+
+    /// Диалог настроек: сочетание клавиш автоввода.
+    fn settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut save = false;
+        let mut cancel = false;
+
+        egui::Window::new("Настройки")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Сочетание клавиш для автоввода");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.hotkey_draft)
+                        .hint_text("Ctrl+Alt+P")
+                        .desired_width(240.0),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Например: Ctrl+Alt+P, Ctrl+Shift+F2. Нужен хотя бы один модификатор. Сейчас: ",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.label(egui::RichText::new(self.hotkey.label()).small().strong());
+
+                if let Some(error) = &self.hotkey_error {
+                    ui.add_space(6.0);
+                    ui.colored_label(egui::Color32::from_rgb(200, 60, 60), error);
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Сохранить").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel || !open {
+            self.settings_open = false;
+            self.hotkey_error = None;
+            return;
+        }
+
+        if save {
+            match autotype::Hotkey::parse(&self.hotkey_draft) {
+                Err(err) => self.hotkey_error = Some(err),
+                Ok(hotkey) => {
+                    autotype::rebind(hotkey);
+                    self.hotkey = hotkey;
+                    self.hotkey_draft = hotkey.label();
+                    self.hotkey_error = None;
+                    self.settings_open = false;
+                    save_settings(self.theme, self.hotkey);
+                    self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
+                }
+            }
         }
     }
 
@@ -1702,7 +2006,7 @@ impl eframe::App for App {
                 } else if let Some(title) = self.autotype_title() {
                     format!("Автоввод: {title}")
                 } else {
-                    "Ctrl+Alt+A — автоввод".to_string()
+                    format!("{} — автоввод", self.hotkey.label())
                 };
                 ui.label(egui::RichText::new(hint).small().weak());
                 if self.clipboard.is_some() {
@@ -1717,6 +2021,7 @@ impl eframe::App for App {
         });
 
         help::show(ui.ctx(), &mut self.help_open);
+        self.settings_dialog(ui.ctx());
         self.autotype_overlay(ui.ctx());
     }
 }
