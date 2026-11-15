@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use uuid::Uuid;
 use vault_core::{
-    ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, PassphraseOptions,
-    Separator, Totp, Vault, Wordlist, auto_description, expiries, generate_passphrase,
-    generate_password, generate_wrapping_key, import_file, now_secs, parse_credentials,
-    passphrase_entropy_bits, password_entropy_bits, protected_wrapping_key, sidecar_path,
+    ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, MatchStrength,
+    PassphraseOptions, Separator, Totp, Vault, Wordlist, auto_description, expiries,
+    generate_passphrase, generate_password, generate_wrapping_key, import_file, now_secs,
+    parse_credentials, passphrase_entropy_bits, password_entropy_bits, protected_wrapping_key,
+    sidecar_path,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -237,11 +238,12 @@ fn settings_path() -> PathBuf {
     app_dir().join("settings.txt")
 }
 
-/// Настройки программы: тема, сочетание клавиш автоввода и последний путь к хранилищу.
+/// Настройки программы: тема, сочетания клавиш и последний путь к хранилищу.
 #[derive(Clone)]
 struct Settings {
     theme: Theme,
     hotkey: autotype::Hotkey,
+    quick_hotkey: autotype::Hotkey,
     vault_path: Option<String>,
 }
 
@@ -249,6 +251,7 @@ fn load_settings() -> Settings {
     let mut settings = Settings {
         theme: Theme::Light,
         hotkey: autotype::Hotkey::default(),
+        quick_hotkey: autotype::quick_default(),
         vault_path: None,
     };
     let Ok(text) = std::fs::read_to_string(settings_path()) else {
@@ -279,6 +282,11 @@ fn load_settings() -> Settings {
                     settings.hotkey = hotkey;
                 }
             }
+            "quickkey" => {
+                if let Ok(hotkey) = autotype::Hotkey::parse(value.trim()) {
+                    settings.quick_hotkey = hotkey;
+                }
+            }
             "path" => {
                 let path = value.trim();
                 if !path.is_empty() {
@@ -291,7 +299,12 @@ fn load_settings() -> Settings {
     settings
 }
 
-fn save_settings(theme: Theme, hotkey: autotype::Hotkey, vault_path: &str) {
+fn save_settings(
+    theme: Theme,
+    hotkey: autotype::Hotkey,
+    quick: autotype::Hotkey,
+    vault_path: &str,
+) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -301,8 +314,9 @@ fn save_settings(theme: Theme, hotkey: autotype::Hotkey, vault_path: &str) {
         Theme::Dark => "dark",
     };
     let mut text = format!(
-        "theme={theme_value}\nhotkey={}\n",
-        hotkey.label().to_lowercase()
+        "theme={theme_value}\nhotkey={}\nquickkey={}\n",
+        hotkey.label().to_lowercase(),
+        quick.label().to_lowercase()
     );
     // Последний открытый файл: при следующем запуске поле уже заполнено.
     let path = vault_path.trim();
@@ -383,6 +397,8 @@ struct Draft {
     username: String,
     password: String,
     url: String,
+    /// Дополнительные сайты записи — по одному адресу в строке.
+    urls: String,
     notes: String,
     fields: Vec<Field>,
     show_plain: bool,
@@ -401,6 +417,7 @@ impl Draft {
             username: String::new(),
             password: String::new(),
             url: String::new(),
+            urls: String::new(),
             notes: String::new(),
             fields: kind.template(),
             show_plain: true,
@@ -415,6 +432,7 @@ impl Draft {
             username: item.username.clone(),
             password: item.password.clone(),
             url: item.url.clone(),
+            urls: item.urls.join("\n"),
             notes: item.notes.clone(),
             fields: item.fields.clone(),
             show_plain: false,
@@ -429,6 +447,13 @@ impl Draft {
         item.username = self.username.trim().to_string();
         item.password = self.password.clone();
         item.url = self.url.trim().to_string();
+        item.urls = self
+            .urls
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
         item.notes = self.notes.clone();
         item.fields = self.fields.clone();
         item
@@ -444,6 +469,20 @@ enum DraftOutcome {
     Idle,
     Cancel,
     Save { item: Box<Item>, is_new: bool },
+}
+
+/// Состояние палитры быстрого доступа: фильтр, курсор и целевое окно,
+/// из которого палитра вызвана.
+struct QuickAccess {
+    query: String,
+    /// Выбранная строка списка.
+    cursor: usize,
+    /// Заголовок целевого окна — по нему сортируются записи.
+    target_title: Option<String>,
+    /// Дескриптор целевого окна для возврата фокуса (0 — неизвестно).
+    target_hwnd: isize,
+    /// Поставить курсор в фильтр при открытии.
+    focus: bool,
 }
 
 struct App {
@@ -488,6 +527,8 @@ struct App {
     audit_open: bool,
     /// Сочетание клавиш автоввода.
     hotkey: autotype::Hotkey,
+    /// Сочетание клавиш быстрого доступа.
+    quick_hotkey: autotype::Hotkey,
     /// Диалог настроек.
     settings_open: bool,
     hotkey_draft: String,
@@ -496,6 +537,12 @@ struct App {
     hotkey_capture: bool,
     /// Поставить курсор в поле сочетания при открытии настроек.
     hotkey_focus: bool,
+    /// Те же поля для сочетания быстрого доступа.
+    quick_draft: String,
+    quick_error: Option<String>,
+    quick_capture: bool,
+    /// Палитра быстрого доступа, открыта пока поле не None.
+    quick_access: Option<QuickAccess>,
     /// Момент, когда надо выполнить автоввод после кнопки с отсчётом.
     autotype_countdown: Option<Instant>,
     /// Сообщение автоввода на несколько секунд поверх окна.
@@ -531,6 +578,7 @@ impl App {
         let settings = load_settings();
         let theme = settings.theme;
         let hotkey = settings.hotkey;
+        let quick_hotkey = settings.quick_hotkey;
         let startup_path = settings
             .vault_path
             .clone()
@@ -538,14 +586,21 @@ impl App {
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
 
-        // Горячая клавиша автоввода живёт, пока запущено приложение.
-        let status = match autotype::start(cc.egui_ctx.clone(), hotkey) {
+        // Горячие клавиши живут, пока запущено приложение: автоввод печатает
+        // логин и пароль, быстрый доступ поднимает палитру выбора записи.
+        let mut status = match autotype::start(cc.egui_ctx.clone(), hotkey, quick_hotkey) {
             Ok(()) => "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
             Err(err) => format!(
                 "Автоввод ({}) недоступен: {err}. Смените комбинацию в настройках. Введите мастер-пароль, чтобы открыть хранилище.",
                 hotkey.label()
             ),
         };
+        if !autotype::is_quick_ready() {
+            status.push_str(&format!(
+                " Быстрый доступ ({}) не зарегистрирован — клавиши заняты другой программой.",
+                quick_hotkey.label()
+            ));
+        }
         Self {
             mode: Mode::Open,
             path: startup_path,
@@ -583,11 +638,16 @@ impl App {
             autotype_countdown: None,
             autotype_notice: None,
             hotkey,
+            quick_hotkey,
             settings_open: false,
             hotkey_draft: hotkey.label(),
             hotkey_error: None,
             hotkey_capture: false,
             hotkey_focus: false,
+            quick_draft: quick_hotkey.label(),
+            quick_error: None,
+            quick_capture: false,
+            quick_access: None,
             kind_filter: KindGroup::All,
             gen_open: false,
             gen_mode: GenMode::Chars,
@@ -628,6 +688,8 @@ impl App {
         self.quick_text.zeroize();
         self.quick_password.zeroize();
         self.desc_open = false;
+        // Палитра быстрого доступа тоже не переживает блокировку.
+        self.quick_access = None;
     }
 
     fn copy(&mut self, text: &str, label: &str) {
@@ -646,6 +708,25 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_hello_unlock();
+
+        // Нажата клавиша быстрого доступа: поток уже запомнил целевое окно
+        // и поднял главное окно — открываем палитру поверх.
+        if let Some(request) = autotype::take_quick_request() {
+            if self.vault.is_some() {
+                self.quick_access = Some(QuickAccess {
+                    query: String::new(),
+                    cursor: 0,
+                    target_title: request.title,
+                    target_hwnd: request.hwnd,
+                    focus: true,
+                });
+                self.status =
+                    "Быстрый доступ: начните печатать, Enter — ввести в окно.".to_string();
+            } else {
+                self.status =
+                    "Хранилище заблокировано — сначала введите мастер-пароль.".to_string();
+            }
+        }
 
         if let Some((at, secret)) = self.clipboard.clone()
             && at.elapsed() >= CLIPBOARD_TTL
@@ -695,7 +776,7 @@ impl App {
                 };
                 // Запоминаем файл: при следующем запуске поле уже заполнено.
                 self.path = vault.path().display().to_string();
-                save_settings(self.theme, self.hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
                 self.vault = Some(vault);
                 self.selected = first;
                 self.hello_pending = None;
@@ -953,7 +1034,7 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
             }
             if ui.small_button("Справка (F1)").clicked() {
                 self.help_open = true;
@@ -976,8 +1057,10 @@ impl App {
 
         // Ctrl+C копирует пароль выбранной записи, но только когда ни одно
         // поле ввода не в фокусе — иначе сломается обычное копирование текста.
+        // В палитре быстрого доступа Ctrl+C обслуживается самой палитрой.
         let no_text_focus = ui.ctx().memory(|memory| memory.focused().is_none());
         if no_text_focus
+            && self.quick_access.is_none()
             && ui
                 .ctx()
                 .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
@@ -1101,7 +1184,7 @@ impl App {
             if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
             }
             if ui.button("Справка").clicked() {
                 self.help_open = true;
@@ -1338,12 +1421,13 @@ impl App {
                                     ui.end_row();
                                 }
 
-                                if !item.url.is_empty() {
-                                    ui.label("Сайт");
+                                let item_urls = item.all_urls();
+                                for (idx, url) in item_urls.iter().enumerate() {
+                                    ui.label(if idx == 0 { "Сайт" } else { "Ещё сайт" });
                                     ui.horizontal(|ui| {
-                                        ui.monospace(&item.url);
+                                        ui.monospace(*url);
                                         if ui.small_button("Копировать").clicked() {
-                                            self.copy(&item.url, "Сайт");
+                                            self.copy(url, "Сайт");
                                         }
                                     });
                                     ui.end_row();
@@ -1641,6 +1725,7 @@ impl App {
         self.export_dialog(ui.ctx(), &mut vault);
         self.audit_dialog(ui.ctx(), &vault);
         self.quick_add_dialog(ui.ctx(), &mut vault);
+        self.quick_access_dialog(ui.ctx(), &mut vault);
         self.descriptions_dialog(ui.ctx(), &mut vault);
         self.generator_dialog(ui.ctx());
 
@@ -1719,7 +1804,58 @@ impl App {
                     .weak(),
                 );
 
-                if let Some(error) = &self.hotkey_error {
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label("Сочетание клавиш быстрого доступа");
+                ui.horizontal(|ui| {
+                    if self.quick_capture {
+                        ui.label(
+                            egui::RichText::new("Нажмите новое сочетание…")
+                                .strong()
+                                .size(16.0),
+                        );
+                    } else {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_draft)
+                                .hint_text("Ctrl+Shift+Space")
+                                .desired_width(220.0),
+                        );
+                    }
+                    let label = if self.quick_capture {
+                        "Отменить запись"
+                    } else {
+                        "Записать сочетание"
+                    };
+                    if ui.button(label).clicked() {
+                        self.quick_capture = !self.quick_capture;
+                        self.quick_error = None;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Нажатая комбинация из любого окна поднимает палитру выбора записи: фильтруйте, Enter — ввести логин и пароль в прежнее окно.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Сейчас: {}", self.quick_hotkey.label()))
+                        .small()
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(if autotype::is_quick_ready() {
+                        "Клавиша быстрого доступа зарегистрирована и работает."
+                    } else {
+                        "Клавиша быстрого доступа сейчас не работает — комбинацию заняла другая программа."
+                    })
+                    .small()
+                    .weak(),
+                );
+
+                if let Some(error) = &self.quick_error {
                     ui.add_space(6.0);
                     ui.colored_label(egui::Color32::from_rgb(200, 60, 60), error);
                 }
@@ -1757,7 +1893,37 @@ impl App {
                     self.apply_hotkey(hotkey);
                 } else {
                     self.hotkey_error = Some(
-                        "нужны модификатор (Ctrl, Alt или Shift) и буква, цифра либо F1–F20"
+                        "нужны модификатор (Ctrl, Alt или Shift) и буква, цифра либо F1–F24"
+                            .to_string(),
+                    );
+                }
+            }
+            ctx.request_repaint();
+        }
+
+        // То же для сочетания быстрого доступа.
+        if self.quick_capture {
+            let pressed = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+            });
+            if let Some((key, modifiers)) = pressed {
+                if key == egui::Key::Escape {
+                    self.quick_capture = false;
+                } else if let Some(hotkey) = autotype::Hotkey::from_egui(key, modifiers) {
+                    self.quick_capture = false;
+                    self.quick_draft = hotkey.label();
+                    self.apply_quick_hotkey(hotkey);
+                } else {
+                    self.quick_error = Some(
+                        "нужны модификатор (Ctrl, Alt или Shift) и буква, цифра либо F1–F24"
                             .to_string(),
                     );
                 }
@@ -1769,6 +1935,8 @@ impl App {
             self.settings_open = false;
             self.hotkey_capture = false;
             self.hotkey_error = None;
+            self.quick_capture = false;
+            self.quick_error = None;
             return;
         }
 
@@ -1776,6 +1944,10 @@ impl App {
             match autotype::Hotkey::parse(&self.hotkey_draft) {
                 Err(err) => self.hotkey_error = Some(err),
                 Ok(hotkey) => self.apply_hotkey(hotkey),
+            }
+            match autotype::Hotkey::parse(&self.quick_draft) {
+                Err(err) => self.quick_error = Some(err),
+                Ok(hotkey) => self.apply_quick_hotkey(hotkey),
             }
         }
     }
@@ -1789,10 +1961,24 @@ impl App {
                 self.hotkey_draft = hotkey.label();
                 self.hotkey_error = None;
                 self.settings_open = false;
-                save_settings(self.theme, self.hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
                 self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
             }
             Err(err) => self.hotkey_error = Some(err),
+        }
+    }
+
+    /// То же для сочетания быстрого доступа.
+    fn apply_quick_hotkey(&mut self, hotkey: autotype::Hotkey) {
+        match autotype::rebind_quick(hotkey) {
+            Ok(()) => {
+                self.quick_hotkey = hotkey;
+                self.quick_draft = hotkey.label();
+                self.quick_error = None;
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                self.status = format!("Клавиша быстрого доступа: {}", hotkey.label());
+            }
+            Err(err) => self.quick_error = Some(err),
         }
     }
 
@@ -2421,6 +2607,192 @@ impl App {
         }
     }
 
+    /// Палитра быстрого доступа (как Quick Access у 1Password): открывается
+    /// глобальной клавишей из любого окна, фильтрует записи, сортирует
+    /// подходящие целевому окну наверх и по Enter возвращает фокус окну
+    /// и печатает туда логин и пароль.
+    fn quick_access_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        let Some(quick) = self.quick_access.as_mut() else {
+            return;
+        };
+
+        // Записи по фильтру; подходящие целевому окну поднимаются наверх.
+        let mut rows: Vec<(Uuid, String, String, ItemKind, MatchStrength)> = vault
+            .items()
+            .iter()
+            .filter(|item| item.matches(&quick.query))
+            .map(|item| {
+                let strength = quick
+                    .target_title
+                    .as_deref()
+                    .map(|title| item.url_match_strength(title))
+                    .unwrap_or(MatchStrength::None);
+                (
+                    item.id,
+                    item.title.clone(),
+                    item.username.clone(),
+                    item.kind,
+                    strength,
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.4.cmp(&a.4).then_with(|| {
+                let login = |kind: ItemKind| matches!(kind, ItemKind::Login);
+                login(b.3).cmp(&login(a.3))
+            })
+        });
+        rows.truncate(10);
+        if quick.cursor >= rows.len() {
+            quick.cursor = rows.len().saturating_sub(1);
+        }
+
+        // Навигация клавишами работает и в поле фильтра, и просто в окне.
+        let mut commit = None;
+        let (go_up, go_down, enter, copy_password) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+            )
+        });
+        if enter {
+            commit = Some(quick.cursor);
+        }
+        if go_up && quick.cursor > 0 {
+            quick.cursor -= 1;
+        }
+        if go_down && quick.cursor + 1 < rows.len() {
+            quick.cursor += 1;
+        }
+
+        let mut open = true;
+        egui::Window::new("Быстрый доступ")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 48.0))
+            .show(ctx, |ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut quick.query)
+                        .hint_text("Название, логин или сайт…")
+                        .desired_width(f32::INFINITY),
+                );
+                if quick.focus {
+                    edit.request_focus();
+                    quick.focus = false;
+                }
+                ui.add_space(4.0);
+
+                if rows.is_empty() {
+                    ui.label(egui::RichText::new("Ничего не найдено").weak());
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("quick_rows")
+                        .auto_shrink([false, false])
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for (idx, (_, title, username, kind, strength)) in
+                                rows.iter().enumerate()
+                            {
+                                let mut second = if username.is_empty() {
+                                    kind.label().to_string()
+                                } else {
+                                    username.clone()
+                                };
+                                match strength {
+                                    MatchStrength::Strong => {
+                                        second.push_str(" · сайт совпадает");
+                                    }
+                                    MatchStrength::Weak => {
+                                        second.push_str(" · похоже по названию");
+                                    }
+                                    MatchStrength::None => {}
+                                }
+                                let selected = quick.cursor == idx;
+                                if ui
+                                    .selectable_label(selected, format!("{title}\n{second}"))
+                                    .clicked()
+                                {
+                                    commit = Some(idx);
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(match quick.target_title.as_deref() {
+                        Some(title) if !title.is_empty() => {
+                            format!("Целевое окно: {title}")
+                        }
+                        _ => "Целевое окно неизвестно — ввод пойдёт в активное окно".to_string(),
+                    })
+                    .small()
+                    .weak(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Enter — ввести · Ctrl+C — копировать пароль · Esc — закрыть",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        if !open {
+            self.quick_access = None;
+            return;
+        }
+
+        // Действие по выбранной строке: копия пароля или автоввод в окно.
+        let Some(idx) = commit else {
+            if copy_password && !rows.is_empty() {
+                let idx = quick.cursor;
+                let target_hwnd = quick.target_hwnd;
+                let (_, title, username, _, _) = &rows[idx];
+                if let Some(item) = vault.get(rows[idx].0) {
+                    let password = item.password.clone();
+                    if password.is_empty() {
+                        self.status = format!("У записи «{title}» нет пароля.");
+                    } else {
+                        let _ = (target_hwnd, username);
+                        self.copy(&password, "Пароль");
+                        self.quick_access = None;
+                    }
+                }
+            }
+            return;
+        };
+        let (id, title, username, _, _) = rows[idx].clone();
+        let target_hwnd = quick.target_hwnd;
+        let Some(item) = vault.get(id) else {
+            self.quick_access = None;
+            return;
+        };
+        let username = if item.username.is_empty() {
+            username
+        } else {
+            item.username.clone()
+        };
+        let password = item.password.clone();
+        if username.is_empty() && password.is_empty() {
+            self.status = format!("У записи «{title}» нет логина и пароля.");
+            self.quick_access = None;
+            return;
+        }
+        self.status = format!("Возвращаюсь в целевое окно: {title}…");
+        autotype::run_quick(
+            ctx.clone(),
+            target_hwnd,
+            username,
+            Zeroizing::new(password),
+            title,
+        );
+        self.quick_access = None;
+    }
+
     /// Массовое добавление осмысленных описаний записям без заметок.
     fn descriptions_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
         if !self.desc_open {
@@ -2608,6 +2980,7 @@ impl eframe::App for App {
         // разбираем напрямую: так работает и при необычных модификаторах.
         // Ctrl+H — запасной вариант для ноутбуков, где F1 занята мультимедиа.
         let f1_pressed = !self.hotkey_capture
+            && !self.quick_capture
             && (ui.ctx().input(|input| {
                 input.events.iter().any(|event| {
                     matches!(
@@ -2663,8 +3036,11 @@ impl eframe::App for App {
         if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape))
             && !self.help_open
             && !self.hotkey_capture
+            && !self.quick_capture
         {
-            if self.quick_open {
+            if self.quick_access.is_some() {
+                self.quick_access = None;
+            } else if self.quick_open {
                 self.quick_open = false;
                 self.quick_text.zeroize();
                 self.quick_password.zeroize();
@@ -2717,13 +3093,21 @@ impl eframe::App for App {
             }
             ui.label(egui::RichText::new(&self.status).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let hint = if !autotype::is_ready() {
+                let mut hint = if !autotype::is_ready() {
                     "автоввод недоступен".to_string()
                 } else if let Some(title) = self.autotype_title() {
                     format!("Автоввод: {title}")
                 } else {
                     format!("{} — автоввод", self.hotkey.label())
                 };
+                if autotype::is_quick_ready() {
+                    hint.push_str(&format!(
+                        " · {} — быстрый доступ",
+                        self.quick_hotkey.label()
+                    ));
+                } else {
+                    hint.push_str(" · быстрый доступ недоступен");
+                }
                 ui.label(egui::RichText::new(hint).small().weak());
                 if self.clipboard.is_some() {
                     ui.separator();
@@ -2872,6 +3256,15 @@ fn draw_draft(
 
                         ui.label("Сайт");
                         ui.add(egui::TextEdit::singleline(&mut d.url).desired_width(380.0));
+                        ui.end_row();
+
+                        ui.label("Ещё сайты");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut d.urls)
+                                .desired_rows(2)
+                                .desired_width(380.0)
+                                .hint_text("по одному адресу в строке: сайт, кабинет, форум"),
+                        );
                         ui.end_row();
                     }
                 });

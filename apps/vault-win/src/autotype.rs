@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
@@ -21,15 +22,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_RETURN, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, MSG, PM_NOREMOVE, PeekMessageW,
-    WM_HOTKEY,
+    EnumWindows, GetForegroundWindow, GetMessageW, GetWindowTextW, GetWindowThreadProcessId, MSG,
+    PM_NOREMOVE, PeekMessageW, SW_RESTORE, SetForegroundWindow, ShowWindow, WM_HOTKEY,
 };
 use zeroize::Zeroizing;
 
-/// Идентификатор горячей клавиши — произвольный, лишь бы уникальный в программе.
+/// Идентификатор горячей клавиши автоввода — произвольный, лишь бы уникальный в программе.
 const HOTKEY_ID: i32 = 0x4A1;
+/// Идентификатор горячей клавиши быстрого доступа.
+const QUICK_ID: i32 = 0x4A2;
 /// Сообщение потоку: перечитать сочетание из `BINDING` и перерегистрироваться.
 const WM_REBIND: u32 = 0x8000 + 1;
+/// Заголовок главного окна — по нему окно ищется при открытии быстрого доступа.
+const MAIN_TITLE_PREFIX: &str = "Хранитель";
 
 /// Сочетание клавиш для автоввода.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +55,16 @@ impl Default for Hotkey {
             shift: false,
             key: 0x50,
         }
+    }
+}
+
+/// Сочетание быстрого доступа (как Quick Access у 1Password).
+pub fn quick_default() -> Hotkey {
+    Hotkey {
+        ctrl: true,
+        alt: false,
+        shift: true,
+        key: 0x20, // VK_SPACE
     }
 }
 
@@ -135,6 +150,9 @@ impl Hotkey {
 }
 
 fn parse_key(name: &str) -> Result<u32, String> {
+    if name == "space" || name == "пробел" {
+        return Ok(0x20);
+    }
     if let Some(number) = name.strip_prefix('f')
         && let Ok(number) = number.parse::<u32>()
         && (1..=24).contains(&number)
@@ -155,6 +173,9 @@ fn parse_key(name: &str) -> Result<u32, String> {
 }
 
 fn key_name(key: u32) -> String {
+    if key == 0x20 {
+        return "Space".to_string();
+    }
     if (0x70..=0x87).contains(&key) {
         return format!("F{}", key - 0x6F);
     }
@@ -224,6 +245,7 @@ fn vk_from_egui(key: egui::Key) -> Option<u32> {
         Key::F18 => 0x81,
         Key::F19 => 0x82,
         Key::F20 => 0x83,
+        Key::Space => 0x20,
         _ => return None,
     })
 }
@@ -234,6 +256,23 @@ pub struct Credentials {
     pub title: String,
     pub username: String,
     pub password: Zeroizing<String>,
+}
+
+/// Целевое окно для быстрого доступа: то, что было активно в момент нажатия.
+#[derive(Clone)]
+pub struct QuickRequest {
+    /// Заголовок целевого окна (для подсказки и выбора записи). None — если
+    /// в момент нажатия активно было окно «Хранителя».
+    pub title: Option<String>,
+    /// Системный дескриптор целевого окна (0 — если целевого окна нет).
+    pub hwnd: isize,
+}
+
+/// Какой из двух горячих клавиш меняем сочетание.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Autotype,
+    Quick,
 }
 
 /// Состояние автоввода, которое UI публикует для потока горячей клавиши.
@@ -249,6 +288,8 @@ pub enum AutotypeState {
 struct Shared {
     state: Mutex<AutotypeState>,
     message: Mutex<Option<String>>,
+    /// Запрос на открытие быстрого доступа из потока горячих клавиш.
+    quick_request: Mutex<Option<QuickRequest>>,
     binding: Mutex<Hotkey>,
 }
 
@@ -257,41 +298,66 @@ fn shared() -> &'static Shared {
     SHARED.get_or_init(|| Shared {
         state: Mutex::new(AutotypeState::Locked),
         message: Mutex::new(None),
+        quick_request: Mutex::new(None),
         binding: Mutex::new(Hotkey::default()),
     })
 }
 
 /// Идентификатор потока горячей клавиши — ему адресуются команды переназначения.
 static HOTKEY_THREAD: AtomicU32 = AtomicU32::new(0);
-/// Зарегистрирована ли клавиша прямо сейчас (поток обновляет после каждой попытки).
+/// Зарегистрирована ли клавиша автоввода прямо сейчас.
 static READY: AtomicBool = AtomicBool::new(false);
+/// Зарегистрирована ли клавиша быстрого доступа прямо сейчас.
+static QUICK_READY: AtomicBool = AtomicBool::new(false);
 /// Текущее сочетание для показа в интерфейсе.
 static CURRENT: OnceLock<Mutex<Hotkey>> = OnceLock::new();
+static QUICK_CURRENT: OnceLock<Mutex<Hotkey>> = OnceLock::new();
 
 fn current() -> &'static Mutex<Hotkey> {
     CURRENT.get_or_init(|| Mutex::new(Hotkey::default()))
 }
 
+fn quick_current() -> &'static Mutex<Hotkey> {
+    QUICK_CURRENT.get_or_init(|| Mutex::new(quick_default()))
+}
+
 /// Запрос на смену сочетания: поток отвечает, получилось ли зарегистрировать.
 struct RebindRequest {
+    slot: Slot,
     hotkey: Hotkey,
     reply: std::sync::mpsc::Sender<Result<(), String>>,
 }
 
-fn rebind_slot() -> &'static Mutex<Option<RebindRequest>> {
+fn rebind_slot_storage() -> &'static Mutex<Option<RebindRequest>> {
     static SLOT: OnceLock<Mutex<Option<RebindRequest>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-/// Готова ли горячая клавиша к работе. UI спрашивает это каждый кадр,
+/// Готова ли горячая клавиша автоввода к работе. UI спрашивает это каждый кадр,
 /// поэтому подсказка в строке состояния не врёт после смены сочетания.
 pub fn is_ready() -> bool {
     READY.load(Ordering::SeqCst)
 }
 
-/// Регистрирует горячую клавишу и запускает поток ожидания нажатия.
-pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
+/// Готова ли горячая клавиша быстрого доступа.
+pub fn is_quick_ready() -> bool {
+    QUICK_READY.load(Ordering::SeqCst)
+}
+
+/// Забирает запрос на быстрый доступ: целевое окно, нажатое пользователем.
+pub fn take_quick_request() -> Option<QuickRequest> {
+    shared()
+        .quick_request
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+/// Регистрирует обе горячие клавиши и запускает поток ожидания нажатия.
+/// Сочетание быстрого доступа может не встать — это не мешает автовводу.
+pub fn start(ctx: egui::Context, hotkey: Hotkey, quick: Hotkey) -> Result<(), String> {
     *current().lock().expect("мьютекс текущей клавиши") = hotkey;
+    *quick_current().lock().expect("мьютекс клавиши доступа") = quick;
     if let Ok(mut binding) = shared().binding.lock() {
         *binding = hotkey;
     }
@@ -315,7 +381,15 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
             active = Some(hotkey);
             READY.store(true, Ordering::SeqCst);
         }
-        let _ = sender.send((registered.is_ok(), hotkey));
+
+        let mut quick_active = None;
+        let quick_registered =
+            unsafe { RegisterHotKey(None, QUICK_ID, quick.modifiers(), quick.key) };
+        if quick_registered.is_ok() {
+            quick_active = Some(quick);
+            QUICK_READY.store(true, Ordering::SeqCst);
+        }
+        let _ = sender.send((registered.is_ok(), quick_registered.is_ok(), hotkey));
 
         loop {
             let mut message = MSG::default();
@@ -325,24 +399,42 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
             }
             match message.message {
                 WM_HOTKEY => {
-                    let text = autotype_once();
-                    if let Ok(mut slot) = shared().message.lock() {
-                        *slot = Some(text);
+                    if message.wParam.0 == QUICK_ID as usize {
+                        quick_pressed(&ctx);
+                    } else {
+                        let text = autotype_once();
+                        if let Ok(mut slot) = shared().message.lock() {
+                            *slot = Some(text);
+                        }
                     }
                     ctx.request_repaint();
                 }
                 WM_REBIND => {
-                    let request = rebind_slot().lock().ok().and_then(|mut slot| slot.take());
+                    let request = rebind_slot_storage()
+                        .lock()
+                        .ok()
+                        .and_then(|mut slot| slot.take());
                     let Some(request) = request else {
                         continue;
                     };
-                    let outcome = apply_binding(&mut active, request.hotkey);
+                    let outcome = match request.slot {
+                        Slot::Autotype => {
+                            apply_binding(HOTKEY_ID, &mut active, request.hotkey, &READY)
+                        }
+                        Slot::Quick => {
+                            apply_binding(QUICK_ID, &mut quick_active, request.hotkey, &QUICK_READY)
+                        }
+                    };
+                    let label = match request.slot {
+                        Slot::Autotype => "Автоввод",
+                        Slot::Quick => "Быстрый доступ",
+                    };
                     if let Ok(mut slot) = shared().message.lock() {
                         *slot = Some(match &outcome {
                             Ok(()) => {
-                                format!("Автоввод: новая комбинация {}", request.hotkey.label())
+                                format!("{label}: новая комбинация {}", request.hotkey.label())
                             }
-                            Err(error) => format!("Автоввод: {error}"),
+                            Err(error) => format!("{label}: {error}"),
                         });
                     }
                     let _ = request.reply.send(outcome);
@@ -353,11 +445,16 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
         }
 
         READY.store(false, Ordering::SeqCst);
+        QUICK_READY.store(false, Ordering::SeqCst);
     });
 
     match receiver.recv() {
-        Ok((true, _)) => Ok(()),
-        Ok((false, binding)) => Err(format!(
+        Ok((true, _, _)) => Ok(()),
+        Ok((false, true, binding)) => Err(format!(
+            "клавиши {} заняты другой программой — работает только быстрый доступ",
+            binding.label()
+        )),
+        Ok((false, false, binding)) => Err(format!(
             "клавиши {} заняты другой программой",
             binding.label()
         )),
@@ -367,34 +464,43 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
 
 /// Снимает прежнюю регистрацию и ставит новую. Если новая занята, старая
 /// возвращается на место — иначе пользователь остался бы вообще без автоввода.
-fn apply_binding(active: &mut Option<Hotkey>, requested: Hotkey) -> Result<(), String> {
+fn apply_binding(
+    id: i32,
+    active: &mut Option<Hotkey>,
+    requested: Hotkey,
+    ready: &AtomicBool,
+) -> Result<(), String> {
     let previous = *active;
-    if previous == Some(requested) && is_ready() {
+    if previous == Some(requested) && ready.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     unsafe {
-        let _ = UnregisterHotKey(None, HOTKEY_ID);
+        let _ = UnregisterHotKey(None, id);
     }
-    READY.store(false, Ordering::SeqCst);
+    ready.store(false, Ordering::SeqCst);
     *active = None;
 
-    let registered =
-        unsafe { RegisterHotKey(None, HOTKEY_ID, requested.modifiers(), requested.key) };
+    let registered = unsafe { RegisterHotKey(None, id, requested.modifiers(), requested.key) };
     if registered.is_ok() {
         *active = Some(requested);
-        *current().lock().expect("мьютекс текущей клавиши") = requested;
-        READY.store(true, Ordering::SeqCst);
+        let slot_current = if id == QUICK_ID {
+            quick_current()
+        } else {
+            current()
+        };
+        *slot_current.lock().expect("мьютекс текущей клавиши") = requested;
+        ready.store(true, Ordering::SeqCst);
         return Ok(());
     }
 
     let mut restored = false;
     if let Some(previous) = previous
-        && unsafe { RegisterHotKey(None, HOTKEY_ID, previous.modifiers(), previous.key) }.is_ok()
+        && unsafe { RegisterHotKey(None, id, previous.modifiers(), previous.key) }.is_ok()
     {
         *active = Some(previous);
         restored = true;
-        READY.store(true, Ordering::SeqCst);
+        ready.store(true, Ordering::SeqCst);
     }
 
     Err(if restored {
@@ -408,20 +514,35 @@ fn apply_binding(active: &mut Option<Hotkey>, requested: Hotkey) -> Result<(), S
     })
 }
 
-/// Просит поток перерегистрировать сочетание и дожидается ответа.
+/// Просит поток перерегистрировать сочетание автоввода и дожидается ответа.
 /// Ошибка означает, что комбинация не встала (старая при этом сохраняется).
 pub fn rebind(hotkey: Hotkey) -> Result<(), String> {
-    if let Ok(mut binding) = shared().binding.lock() {
+    rebind_in_thread(Slot::Autotype, hotkey)
+}
+
+/// То же для сочетания быстрого доступа.
+pub fn rebind_quick(hotkey: Hotkey) -> Result<(), String> {
+    rebind_in_thread(Slot::Quick, hotkey)
+}
+
+fn rebind_in_thread(slot: Slot, hotkey: Hotkey) -> Result<(), String> {
+    if slot == Slot::Autotype
+        && let Ok(mut binding) = shared().binding.lock()
+    {
         *binding = hotkey;
     }
     let thread_id = HOTKEY_THREAD.load(Ordering::SeqCst);
     if thread_id == 0 {
-        return Err("поток автоввода ещё не запущен".to_string());
+        return Err("поток горячих клавиш ещё не запущен".to_string());
     }
 
     let (reply, answer) = std::sync::mpsc::channel();
-    if let Ok(mut slot) = rebind_slot().lock() {
-        *slot = Some(RebindRequest { hotkey, reply });
+    if let Ok(mut request) = rebind_slot_storage().lock() {
+        *request = Some(RebindRequest {
+            slot,
+            hotkey,
+            reply,
+        });
     }
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
@@ -449,6 +570,109 @@ pub fn run_after(delay: Duration, ctx: egui::Context) {
         }
         ctx.request_repaint();
     });
+}
+
+/// Вводит выбранную в быстром доступе запись в заранее запомненное окно.
+/// Работает из отдельного потока: окно-мишень получает фокус, получает
+/// небольшую фору на переключение, затем в него печатается логин и пароль.
+pub fn run_quick(
+    ctx: egui::Context,
+    target_hwnd: isize,
+    username: String,
+    password: Zeroizing<String>,
+    title: String,
+) {
+    thread::spawn(move || {
+        if target_hwnd != 0 {
+            // Целевое окно помнит нажатие — сначала возвращаем ему фокус.
+            unsafe {
+                let _ = SetForegroundWindow(HWND(target_hwnd as *mut core::ffi::c_void));
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        let text = match type_credentials(&username, &password) {
+            Ok(()) => format!("Логин и пароль введены в активное окно: {title}."),
+            Err(err) => format!("Автоввод не удался: {err}."),
+        };
+        if let Ok(mut slot) = shared().message.lock() {
+            *slot = Some(text);
+        }
+        ctx.request_repaint();
+    });
+}
+
+/// Нажата клавиша быстрого доступа: запоминаем целевое окно (то, что было
+/// активно до нас), поднимаем главное окно «Хранителя» и просим перерисовки.
+fn quick_pressed(ctx: &egui::Context) {
+    let window = unsafe { GetForegroundWindow() };
+    let own_window = window_pid(window) == std::process::id();
+    let request = QuickRequest {
+        title: (!own_window).then(|| window_title(window)),
+        hwnd: if own_window { 0 } else { window.0 as isize },
+    };
+    if let Ok(mut slot) = shared().quick_request.lock() {
+        *slot = Some(request);
+    }
+    restore_main_window();
+    ctx.request_repaint();
+}
+
+/// Заголовок окна.
+fn window_title(window: HWND) -> String {
+    let mut buffer = [0u16; 512];
+    let len = unsafe { GetWindowTextW(window, &mut buffer) };
+    if len <= 0 {
+        return String::new();
+    }
+    let len = len as usize;
+    String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
+}
+
+/// Процесс-владелец окна.
+fn window_pid(window: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe {
+        let _ = GetWindowThreadProcessId(window, Some(&mut pid as *mut u32));
+    }
+    pid
+}
+
+/// Поднимает главное окно «Хранителя»: разворачивает, если свёрнуто,
+/// и переводит на передний план. Вызывается с потока горячих клавиш.
+fn restore_main_window() {
+    struct Collector {
+        found: Option<HWND>,
+    }
+
+    // SAFETY: lParam указывает на структуру в стеке текущего вызова —
+    // перечисление синхронное, указатель живёт до возврата из EnumWindows.
+    unsafe extern "system" fn callback(window: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        // SAFETY: указатель получен от нас же в вызове EnumWindows ниже.
+        let collector = unsafe { &mut *(lparam.0 as *mut Collector) };
+        if collector.found.is_some() {
+            return windows::core::BOOL(1);
+        }
+        if window_pid(window) == std::process::id() {
+            let title = window_title(window);
+            if title.starts_with(MAIN_TITLE_PREFIX) {
+                collector.found = Some(window);
+            }
+        }
+        windows::core::BOOL(1)
+    }
+
+    let mut collector = Collector { found: None };
+    unsafe {
+        let _ = EnumWindows(
+            Some(callback),
+            LPARAM(&mut collector as *mut Collector as isize),
+        );
+        if let Some(window) = collector.found {
+            // SW_RESTORE и разворачивает свёрнутое окно, и активирует обычное.
+            let _ = ShowWindow(window, SW_RESTORE);
+            let _ = SetForegroundWindow(window);
+        }
+    }
 }
 
 /// Отдаёт потоку горячей клавиши актуальное состояние. Вызывается из UI.
@@ -691,14 +915,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_space_hotkey_for_quick_access() {
+        let hotkey = Hotkey::parse("ctrl+shift+space").expect("разбор");
+        assert_eq!(hotkey, quick_default());
+        assert_eq!(hotkey.label(), "Ctrl+Shift+Space");
+        // Русское написание тоже понимаем — и в обоих направлениях.
+        assert_eq!(
+            Hotkey::parse("Ctrl+Shift+Пробел").expect("разбор по-русски"),
+            quick_default()
+        );
+        // Сочетания двух клавиш должны различаться.
+        assert_ne!(quick_default(), Hotkey::default());
+    }
+
+    #[test]
     fn rebinding_replaces_the_registered_combination() {
         let first = Hotkey::parse("Ctrl+Alt+F9").expect("разбор первой");
         let second = Hotkey::parse("Ctrl+Alt+F10").expect("разбор второй");
-        let _ = start(egui::Context::default(), first);
+        let quick_first = Hotkey::parse("Ctrl+Alt+F11").expect("разбор первой быстрой");
+        let quick_second = Hotkey::parse("Ctrl+Alt+F12").expect("разбор второй быстрой");
+        let _ = start(egui::Context::default(), first, quick_first);
 
         rebind(second).expect("новая комбинация должна встать");
         assert_eq!(current().lock().expect("мьютекс").label(), "Ctrl+Alt+F10");
         assert!(is_ready());
+
+        rebind_quick(quick_second).expect("новая быстрая комбинация должна встать");
+        assert_eq!(
+            quick_current().lock().expect("мьютекс").label(),
+            "Ctrl+Alt+F12"
+        );
+        assert!(is_quick_ready());
 
         rebind(first).expect("возврат на прежнюю комбинацию");
         assert_eq!(current().lock().expect("мьютекс").label(), "Ctrl+Alt+F9");
