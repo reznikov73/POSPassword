@@ -246,6 +246,11 @@ pub struct Item {
     pub password: String,
     #[serde(default)]
     pub url: String,
+    /// Дополнительные сайты записи: один сервис часто живёт на нескольких
+    /// адресах (логин, кабинет, форум). Основной `url` — для совместимости
+    /// со старыми файлами; поиск и матчинг идут по всем адресам сразу.
+    #[serde(default)]
+    pub urls: Vec<String>,
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -267,6 +272,7 @@ impl Item {
             username: String::new(),
             password: String::new(),
             url: String::new(),
+            urls: Vec::new(),
             notes: String::new(),
             tags: Vec::new(),
             fields: Vec::new(),
@@ -306,6 +312,35 @@ impl Item {
         }
     }
 
+    /// Все сайты записи: основной плюс дополнительные, без пустых строк.
+    pub fn all_urls(&self) -> Vec<&str> {
+        let mut urls: Vec<&str> = Vec::new();
+        if !self.url.trim().is_empty() {
+            urls.push(self.url.trim());
+        }
+        urls.extend(self.urls.iter().map(|u| u.trim()).filter(|u| !u.is_empty()));
+        urls.sort_unstable();
+        urls.dedup();
+        urls
+    }
+
+    /// Относится ли запись к адресу: основной или дополнительный сайт
+    /// совпадает по базовому домену (`lk.domclick.ru` и `domclick.ru` — один).
+    pub fn matches_url(&self, url: &str) -> bool {
+        self.all_urls()
+            .iter()
+            .any(|item| crate::sites::url_matches(item, url))
+    }
+
+    /// Насколько заголовок окна похож на сайт записи — для подсказки автоввода.
+    pub fn url_match_strength(&self, title: &str) -> crate::sites::MatchStrength {
+        self.all_urls()
+            .iter()
+            .map(|url| crate::sites::url_matches_title(url, title))
+            .max()
+            .unwrap_or(crate::sites::MatchStrength::None)
+    }
+
     /// Поиск по видимым полям. Секретные значения (пароль, номер карты, CVV,
     /// номера документов) намеренно не индексируются: иначе по выдаче можно
     /// подтверждать догадки.
@@ -317,6 +352,7 @@ impl Item {
         self.title.to_lowercase().contains(&q)
             || self.username.to_lowercase().contains(&q)
             || self.url.to_lowercase().contains(&q)
+            || self.urls.iter().any(|u| u.to_lowercase().contains(&q))
             || self.notes.to_lowercase().contains(&q)
             || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
             || self

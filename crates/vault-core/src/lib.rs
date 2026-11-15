@@ -22,6 +22,7 @@ mod import;
 mod model;
 mod passphrase;
 mod quickadd;
+mod sites;
 mod totp;
 mod vault;
 
@@ -38,5 +39,8 @@ pub use passphrase::{
     PassphraseOptions, Separator, Wordlist, generate_passphrase, passphrase_entropy_bits,
 };
 pub use quickadd::{ParsedCredentials, parse_credentials};
+pub use sites::{
+    MatchStrength, normalize_host, registrable_domain, url_matches, url_matches_title,
+};
 pub use totp::{Totp, now_secs};
 pub use vault::{FORMAT_VERSION, MAGIC, Vault};
