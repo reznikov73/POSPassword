@@ -2790,7 +2790,13 @@ impl App {
                     return;
                 }
                 let domain = Self::site_domain(&url);
-                if domain.is_empty() || self.browser_domains.contains(&domain) {
+                // Без сайта в запросе непонятно, о каком доступе спрашивать:
+                // пустой домен раньше сразу давал ответ без диалога.
+                if domain.is_empty() {
+                    let _ = reply.send(browser::error_json("не удалось определить сайт запроса"));
+                    return;
+                }
+                if self.browser_domains.contains(&domain) {
                     let _ = reply.send(self.logins_reply(&url));
                 } else {
                     self.browser_ask = Some(BrowserAsk::Access {
@@ -2808,7 +2814,12 @@ impl App {
                     return;
                 }
                 let domain = Self::site_domain(&url);
-                if domain.is_empty() || self.browser_domains.contains(&domain) {
+                // Тот же запрет: без адреса — никаких паролей и никаких диалогов.
+                if domain.is_empty() {
+                    let _ = reply.send(browser::error_json("не удалось определить сайт запроса"));
+                    return;
+                }
+                if self.browser_domains.contains(&domain) {
                     let _ = reply.send(self.credentials_reply(id, &url));
                 } else {
                     self.browser_ask = Some(BrowserAsk::Access {
@@ -2904,7 +2915,8 @@ impl App {
         let Some(item) = vault.get(id) else {
             return browser::error_json("запись не найдена");
         };
-        if !url.is_empty() && !item.matches_url(url) {
+        // Адрес обязателен: без него нельзя проверить, что запись — про этот сайт.
+        if !credentials_url_ok(url, item.matches_url(url)) {
             return browser::error_json("запись не относится к этому сайту");
         }
         browser::credentials_json(&item.username, &item.password)
@@ -3956,9 +3968,34 @@ fn phrase_sample_stale(mode: GenMode, sample_lang: Option<Wordlist>, language: W
     mode == GenMode::Phrase && sample_lang != Some(language)
 }
 
+/// Пароль из браузера отдаём только когда в запросе есть адрес страницы и
+/// запись действительно относится к этому сайту. Пустой адрес — отказ: иначе
+/// локальный процесс мог бы получить секрет вообще без диалога.
+fn credentials_url_ok(url: &str, item_matches: bool) -> bool {
+    !url.trim().is_empty() && item_matches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_credentials_require_a_site() {
+        assert!(!credentials_url_ok("", true));
+        assert!(!credentials_url_ok("   ", true));
+        assert!(!credentials_url_ok("https://x.ru", false));
+        assert!(credentials_url_ok("https://x.ru", true));
+    }
+
+    #[test]
+    fn browser_site_domain_is_empty_for_garbage() {
+        assert!(App::site_domain("").is_empty());
+        assert!(App::site_domain("https://").is_empty());
+        assert_eq!(
+            App::site_domain("https://lk.domclick.ru/login"),
+            "domclick.ru"
+        );
+    }
 
     #[test]
     fn fresh_phrase_sample_is_not_regenerated() {

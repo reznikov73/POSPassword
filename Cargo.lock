@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "browser-host"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "serde_json",
  "windows",
@@ -2035,7 +2035,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "login-probe"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "eframe",
 ]
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "vault-cli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "rpassword",
  "vault-core",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "vault-win"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arboard",
  "eframe",
