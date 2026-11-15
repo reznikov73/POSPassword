@@ -639,7 +639,7 @@ fn window_pid(window: HWND) -> u32 {
 
 /// Поднимает главное окно «Хранителя»: разворачивает, если свёрнуто,
 /// и переводит на передний план. Вызывается с потока горячих клавиш.
-fn restore_main_window() {
+pub(crate) fn restore_main_window() {
     struct Collector {
         found: Option<HWND>,
     }

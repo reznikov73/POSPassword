@@ -1,0 +1,8 @@
+{
+  "_комментарий": "Шаблон манифеста родного хоста. Установочный скрипт tools/install-browser-host.ps1 копирует его в %APPDATA%\\Hranitel\\browser-host и подставляет абсолютный путь к browser-host.exe и идентификатор расширения.",
+  "name": "ru.hranitel.bridge",
+  "description": "Хранитель — локальное хранилище паролей",
+  "path": "C:\\ПУТЬ\\К\\browser-host.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://ИДЕНТИФИКАТОР_РАСШИРЕНИЯ/"]
+}

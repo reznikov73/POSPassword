@@ -8,13 +8,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autotype;
+mod browser;
 mod filedialog;
 mod hello_win;
 mod help;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -22,9 +24,9 @@ use uuid::Uuid;
 use vault_core::{
     ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, MatchStrength,
     PassphraseOptions, Separator, Totp, Vault, Wordlist, auto_description, expiries,
-    generate_passphrase, generate_password, generate_wrapping_key, import_file, now_secs,
-    parse_credentials, passphrase_entropy_bits, password_entropy_bits, protected_wrapping_key,
-    sidecar_path,
+    generate_passphrase, generate_password, generate_wrapping_key, import_file, normalize_host,
+    now_secs, parse_credentials, passphrase_entropy_bits, password_entropy_bits,
+    protected_wrapping_key, registrable_domain, sidecar_path,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -245,6 +247,8 @@ struct Settings {
     hotkey: autotype::Hotkey,
     quick_hotkey: autotype::Hotkey,
     vault_path: Option<String>,
+    /// Разрешено ли расширению браузера обращаться к хранилищу.
+    browser: bool,
 }
 
 fn load_settings() -> Settings {
@@ -253,6 +257,7 @@ fn load_settings() -> Settings {
         hotkey: autotype::Hotkey::default(),
         quick_hotkey: autotype::quick_default(),
         vault_path: None,
+        browser: true,
     };
     let Ok(text) = std::fs::read_to_string(settings_path()) else {
         return settings;
@@ -287,6 +292,9 @@ fn load_settings() -> Settings {
                     settings.quick_hotkey = hotkey;
                 }
             }
+            "browser" => {
+                settings.browser = value.trim() != "off";
+            }
             "path" => {
                 let path = value.trim();
                 if !path.is_empty() {
@@ -304,6 +312,7 @@ fn save_settings(
     hotkey: autotype::Hotkey,
     quick: autotype::Hotkey,
     vault_path: &str,
+    browser: bool,
 ) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
@@ -313,8 +322,9 @@ fn save_settings(
         Theme::Light => "light",
         Theme::Dark => "dark",
     };
+    let browser_value = if browser { "on" } else { "off" };
     let mut text = format!(
-        "theme={theme_value}\nhotkey={}\nquickkey={}\n",
+        "theme={theme_value}\nhotkey={}\nquickkey={}\nbrowser={browser_value}\n",
         hotkey.label().to_lowercase(),
         quick.label().to_lowercase()
     );
@@ -485,6 +495,56 @@ struct QuickAccess {
     focus: bool,
 }
 
+/// Запрос расширения, ожидающий решения пользователя.
+enum BrowserAsk {
+    /// Разрешение на доступ к сайту.
+    Access {
+        domain: String,
+        request: browser::BrowserRequest,
+        reply: Sender<String>,
+    },
+    /// Сохранить новую запись из браузера.
+    SaveNew {
+        url: String,
+        username: String,
+        password: Zeroizing<String>,
+        title: String,
+        reply: Sender<String>,
+    },
+    /// Обновить пароль существующей записи из браузера.
+    SaveUpdate {
+        id: Uuid,
+        url: String,
+        username: String,
+        password: Zeroizing<String>,
+        title: String,
+        reply: Sender<String>,
+    },
+}
+
+impl BrowserAsk {
+    /// Отвечает отказом, не показывая диалог (блокировка, закрытие).
+    fn deny(self, reason: &str) {
+        let reply = match self {
+            BrowserAsk::Access { reply, .. }
+            | BrowserAsk::SaveNew { reply, .. }
+            | BrowserAsk::SaveUpdate { reply, .. } => reply,
+        };
+        let _ = reply.send(browser::error_json(reason));
+    }
+}
+
+/// Решение пользователя по запросу расширения.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowserOutcome {
+    AllowOnce,
+    AllowAlways,
+    Deny,
+    Save,
+    SaveUpdate,
+    SaveAsNew,
+}
+
 struct App {
     mode: Mode,
     path: String,
@@ -571,6 +631,14 @@ struct App {
     desc_open: bool,
     /// Запрос на описание одной записи из карточки.
     describe_one: Option<Uuid>,
+    /// Задания от моста к браузерному расширению.
+    browser_jobs: Receiver<browser::BrowserJob>,
+    /// Запрос расширения, ждущий решения пользователя в диалоге.
+    browser_ask: Option<BrowserAsk>,
+    /// Домены, к которым расширение имеет постоянный доступ.
+    browser_domains: HashSet<String>,
+    /// Разрешено ли расширение браузера обращаться к хранилищу.
+    browser_enabled: bool,
 }
 
 impl App {
@@ -585,6 +653,12 @@ impl App {
             .unwrap_or_else(default_vault_path);
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
+
+        // Мост к браузерному расширению: именованный канал и список
+        // разрешённых сайтов живут, пока запущено приложение.
+        let browser_jobs = browser::start(cc.egui_ctx.clone());
+        let browser_domains = browser::load_domains(&app_dir());
+        let browser_enabled = settings.browser;
 
         // Горячие клавиши живут, пока запущено приложение: автоввод печатает
         // логин и пароль, быстрый доступ поднимает палитру выбора записи.
@@ -663,6 +737,10 @@ impl App {
             quick_url: String::new(),
             desc_open: false,
             describe_one: None,
+            browser_jobs,
+            browser_ask: None,
+            browser_domains,
+            browser_enabled,
         }
     }
 
@@ -690,6 +768,10 @@ impl App {
         self.desc_open = false;
         // Палитра быстрого доступа тоже не переживает блокировку.
         self.quick_access = None;
+        // Запрос расширения, повисший в диалоге, отвечаем отказом.
+        if let Some(ask) = self.browser_ask.take() {
+            ask.deny("Хранилище заблокировано — откройте его и повторите вход на сайте.");
+        }
     }
 
     fn copy(&mut self, text: &str, label: &str) {
@@ -776,7 +858,13 @@ impl App {
                 };
                 // Запоминаем файл: при следующем запуске поле уже заполнено.
                 self.path = vault.path().display().to_string();
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                save_settings(
+                    self.theme,
+                    self.hotkey,
+                    self.quick_hotkey,
+                    &self.path,
+                    self.browser_enabled,
+                );
                 self.vault = Some(vault);
                 self.selected = first;
                 self.hello_pending = None;
@@ -1034,7 +1122,7 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path, self.browser_enabled);
             }
             if ui.small_button("Справка (F1)").clicked() {
                 self.help_open = true;
@@ -1184,7 +1272,7 @@ impl App {
             if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path, self.browser_enabled);
             }
             if ui.button("Справка").clicked() {
                 self.help_open = true;
@@ -1860,6 +1948,38 @@ impl App {
                     ui.colored_label(egui::Color32::from_rgb(200, 60, 60), error);
                 }
 
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                let mut enabled = self.browser_enabled;
+                ui.checkbox(&mut enabled, "Разрешить расширение браузера")
+                    .on_hover_text(
+                        "Автозаполнение и сохранение логинов в браузере через локальный мост (docs/browser.md)",
+                    );
+                if enabled != self.browser_enabled {
+                    self.browser_enabled = enabled;
+                    save_settings(
+                        self.theme,
+                        self.hotkey,
+                        self.quick_hotkey,
+                        &self.path,
+                        self.browser_enabled,
+                    );
+                    self.status = if enabled {
+                        "Мост к браузеру включён.".to_string()
+                    } else {
+                        "Мост к браузеру выключен.".to_string()
+                    };
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Расширение спрашивает у «Хранителя» записи для каждого сайта: первый раз — с вашим разрешением. Пароли не хранятся в браузере.",
+                    )
+                    .weak()
+                    .small(),
+                );
+
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Сохранить").clicked() {
@@ -1961,7 +2081,13 @@ impl App {
                 self.hotkey_draft = hotkey.label();
                 self.hotkey_error = None;
                 self.settings_open = false;
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                save_settings(
+                    self.theme,
+                    self.hotkey,
+                    self.quick_hotkey,
+                    &self.path,
+                    self.browser_enabled,
+                );
                 self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
             }
             Err(err) => self.hotkey_error = Some(err),
@@ -1975,7 +2101,13 @@ impl App {
                 self.quick_hotkey = hotkey;
                 self.quick_draft = hotkey.label();
                 self.quick_error = None;
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path);
+                save_settings(
+                    self.theme,
+                    self.hotkey,
+                    self.quick_hotkey,
+                    &self.path,
+                    self.browser_enabled,
+                );
                 self.status = format!("Клавиша быстрого доступа: {}", hotkey.label());
             }
             Err(err) => self.quick_error = Some(err),
@@ -2607,6 +2739,435 @@ impl App {
         }
     }
 
+    /// Домен сайта по адресу запроса (для разрешения доступа).
+    fn site_domain(url: &str) -> String {
+        match normalize_host(url) {
+            Some(host) => registrable_domain(&host),
+            None => String::new(),
+        }
+    }
+
+    /// Разбирает запросы расширения. Один запрос — один ответ; если нужно
+    /// решение человека, диалог забирает канал ответа себе.
+    fn poll_browser_jobs(&mut self, ctx: &egui::Context) {
+        let _ = ctx;
+        while let Ok(job) = self.browser_jobs.try_recv() {
+            self.handle_browser(job.request, job.reply);
+            // Диалог открыт — за раз решаем один запрос, остальные подождут.
+            if self.browser_ask.is_some() {
+                break;
+            }
+        }
+    }
+
+    /// Обрабатывает запрос или откладывает его в диалог.
+    fn handle_browser(&mut self, request: browser::BrowserRequest, reply: Sender<String>) {
+        if !self.browser_enabled {
+            let _ = reply.send(browser::error_json(
+                "доступ из браузера выключен в настройках «Хранителя»",
+            ));
+            return;
+        }
+        match request {
+            browser::BrowserRequest::Ping => {
+                let _ = reply.send(browser::pong_json());
+            }
+            browser::BrowserRequest::GeneratePassword => {
+                match generate_passphrase(&PassphraseOptions::default()) {
+                    Ok(password) => {
+                        let _ = reply.send(browser::password_json(&password));
+                    }
+                    Err(err) => {
+                        let _ = reply.send(browser::error_json(&format!("генератор: {err}")));
+                    }
+                }
+            }
+            browser::BrowserRequest::GetLogins { url } => {
+                if self.vault.is_none() {
+                    let _ = reply.send(browser::error_json(
+                        "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
+                    ));
+                    return;
+                }
+                let domain = Self::site_domain(&url);
+                if domain.is_empty() || self.browser_domains.contains(&domain) {
+                    let _ = reply.send(self.logins_reply(&url));
+                } else {
+                    self.browser_ask = Some(BrowserAsk::Access {
+                        domain,
+                        request: browser::BrowserRequest::GetLogins { url },
+                        reply,
+                    });
+                }
+            }
+            browser::BrowserRequest::GetCredentials { id, url } => {
+                if self.vault.is_none() {
+                    let _ = reply.send(browser::error_json(
+                        "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
+                    ));
+                    return;
+                }
+                let domain = Self::site_domain(&url);
+                if domain.is_empty() || self.browser_domains.contains(&domain) {
+                    let _ = reply.send(self.credentials_reply(id, &url));
+                } else {
+                    self.browser_ask = Some(BrowserAsk::Access {
+                        domain,
+                        request: browser::BrowserRequest::GetCredentials { id, url },
+                        reply,
+                    });
+                }
+            }
+            browser::BrowserRequest::SaveLogin {
+                url,
+                username,
+                password,
+                title,
+            } => {
+                if self.vault.is_none() {
+                    let _ = reply.send(browser::error_json(
+                        "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
+                    ));
+                    return;
+                }
+                // Есть ли уже запись этого сайта с тем же логином?
+                let existing = self.vault.as_ref().and_then(|vault| {
+                    vault
+                        .items()
+                        .iter()
+                        .find(|item| {
+                            !username.is_empty()
+                                && item.username.eq_ignore_ascii_case(&username)
+                                && item.matches_url(&url)
+                        })
+                        .map(|item| item.id)
+                });
+                match existing {
+                    Some(id) => {
+                        self.browser_ask = Some(BrowserAsk::SaveUpdate {
+                            id,
+                            url,
+                            username,
+                            password: Zeroizing::new(password),
+                            title,
+                            reply,
+                        });
+                    }
+                    None => {
+                        self.browser_ask = Some(BrowserAsk::SaveNew {
+                            url,
+                            username,
+                            password: Zeroizing::new(password),
+                            title,
+                            reply,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Список записей для сайта — без паролей.
+    fn logins_reply(&mut self, url: &str) -> String {
+        let Some(vault) = self.vault.as_ref() else {
+            return browser::error_json("хранилище заблокировано");
+        };
+        let items: Vec<(Uuid, String, String, String)> = vault
+            .items()
+            .iter()
+            .filter(|item| item.matches_url(url))
+            .map(|item| {
+                (
+                    item.id,
+                    item.title.clone(),
+                    item.username.clone(),
+                    item.all_urls()
+                        .first()
+                        .map(|u| u.to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        self.status = format!(
+            "Браузер: записей для {}: {}.",
+            Self::site_domain(url),
+            items.len()
+        );
+        browser::logins_json(url, &items)
+    }
+
+    /// Логин и пароль записи — только если запись относится к этому сайту.
+    fn credentials_reply(&self, id: Uuid, url: &str) -> String {
+        let Some(vault) = self.vault.as_ref() else {
+            return browser::error_json("хранилище заблокировано");
+        };
+        let Some(item) = vault.get(id) else {
+            return browser::error_json("запись не найдена");
+        };
+        if !url.is_empty() && !item.matches_url(url) {
+            return browser::error_json("запись не относится к этому сайту");
+        }
+        browser::credentials_json(&item.username, &item.password)
+    }
+
+    /// Диалоги решений по запросам расширения браузера.
+    fn browser_dialog(&mut self, ctx: &egui::Context) {
+        let mut outcome: Option<BrowserOutcome> = None;
+        let mut drawn = false;
+
+        if let Some(ask) = self.browser_ask.as_ref() {
+            drawn = true;
+            match ask {
+                BrowserAsk::Access { domain, .. } => {
+                    egui::Window::new("Браузер просит доступ")
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(460.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.label(format!(
+                                "Расширение браузера спрашивает записи для сайта {domain}."
+                            ));
+                            ui.label(
+                                egui::RichText::new(
+                                    "Разрешите, только если сами открыли вход на этом сайте.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Разрешить на этот раз").clicked() {
+                                    outcome = Some(BrowserOutcome::AllowOnce);
+                                }
+                                if ui.button(format!("Всегда для {domain}")).clicked() {
+                                    outcome = Some(BrowserOutcome::AllowAlways);
+                                }
+                                if ui.button("Отклонить").clicked() {
+                                    outcome = Some(BrowserOutcome::Deny);
+                                }
+                            });
+                        });
+                }
+                BrowserAsk::SaveNew { url, username, .. } => {
+                    let host = Self::site_domain(url);
+                    egui::Window::new("Браузер предлагает запись")
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(460.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.label(format!(
+                                "Вход на сайте {host}: сохранить новую запись с логином «{username}»?"
+                            ));
+                            ui.label(
+                                egui::RichText::new(
+                                    "Проверьте, что сами только что входили с этими данными.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Сохранить").clicked() {
+                                    outcome = Some(BrowserOutcome::Save);
+                                }
+                                if ui.button("Отклонить").clicked() {
+                                    outcome = Some(BrowserOutcome::Deny);
+                                }
+                            });
+                        });
+                }
+                BrowserAsk::SaveUpdate {
+                    title,
+                    url,
+                    username,
+                    ..
+                } => {
+                    let host = Self::site_domain(url);
+                    let _ = username;
+                    egui::Window::new("Браузер предлагает обновить пароль")
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(460.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.label(format!(
+                                "Изменился пароль записи «{title}» для сайта {host}."
+                            ));
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Обновить пароль").clicked() {
+                                    outcome = Some(BrowserOutcome::SaveUpdate);
+                                }
+                                if ui.button("Сохранить как новую").clicked() {
+                                    outcome = Some(BrowserOutcome::SaveAsNew);
+                                }
+                                if ui.button("Отклонить").clicked() {
+                                    outcome = Some(BrowserOutcome::Deny);
+                                }
+                            });
+                        });
+                }
+            }
+        }
+        if !drawn {
+            return;
+        }
+
+        // Кнопка нажата — разбираемся с запросом и отвечаем расширению.
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let Some(ask) = self.browser_ask.take() else {
+            return;
+        };
+        self.apply_browser_outcome(ask, outcome);
+    }
+
+    /// Выполняет решение пользователя по запросу расширения.
+    fn apply_browser_outcome(&mut self, ask: BrowserAsk, outcome: BrowserOutcome) {
+        match (ask, outcome) {
+            (BrowserAsk::Access { request, reply, .. }, BrowserOutcome::AllowOnce) => {
+                let _ = reply.send(match request {
+                    browser::BrowserRequest::GetLogins { url } => self.logins_reply(&url),
+                    browser::BrowserRequest::GetCredentials { id, url } => {
+                        self.credentials_reply(id, &url)
+                    }
+                    // Другие запросы в диалог доступа не попадают.
+                    _ => browser::error_json("запрос устарел"),
+                });
+            }
+            (
+                BrowserAsk::Access {
+                    domain,
+                    request,
+                    reply,
+                },
+                BrowserOutcome::AllowAlways,
+            ) => {
+                browser::remember_domain(&app_dir(), &domain);
+                self.browser_domains.insert(domain.clone());
+                self.status = format!("Браузер: сайт {domain} разрешён навсегда.");
+                let _ = reply.send(match request {
+                    browser::BrowserRequest::GetLogins { url } => self.logins_reply(&url),
+                    browser::BrowserRequest::GetCredentials { id, url } => {
+                        self.credentials_reply(id, &url)
+                    }
+                    _ => browser::error_json("запрос устарел"),
+                });
+            }
+            (ask, BrowserOutcome::Deny) => {
+                ask.deny("доступ отклонён пользователем");
+            }
+            (
+                BrowserAsk::SaveNew {
+                    url,
+                    username,
+                    password,
+                    title,
+                    reply,
+                },
+                BrowserOutcome::Save,
+            ) => {
+                let saved = self.browser_save_new(&url, &username, &password, &title);
+                let _ = reply.send(saved);
+            }
+            (
+                BrowserAsk::SaveUpdate {
+                    id,
+                    url,
+                    username,
+                    password,
+                    title,
+                    reply,
+                },
+                BrowserOutcome::SaveUpdate,
+            ) => {
+                let saved = self.browser_update_password(id, &password, &url);
+                let _ = reply.send(saved);
+                let _ = (username, title);
+            }
+            (
+                BrowserAsk::SaveUpdate {
+                    url,
+                    username,
+                    password,
+                    title,
+                    reply,
+                    ..
+                },
+                BrowserOutcome::SaveAsNew,
+            ) => {
+                let saved = self.browser_save_new(&url, &username, &password, &title);
+                let _ = reply.send(saved);
+            }
+            (ask, outcome) => {
+                let _ = outcome;
+                ask.deny("запрос отменён");
+            }
+        }
+    }
+
+    /// Создаёт запись из данных формы входа.
+    fn browser_save_new(
+        &mut self,
+        url: &str,
+        username: &str,
+        password: &str,
+        title: &str,
+    ) -> String {
+        let Some(vault) = self.vault.as_mut() else {
+            return browser::error_json("хранилище заблокировано");
+        };
+        let host = Self::site_domain(url);
+        let title = if title.trim().is_empty() {
+            if host.is_empty() {
+                "Новая запись"
+            } else {
+                &host
+            }
+        } else {
+            title.trim()
+        };
+        let mut item = Item::new(ItemKind::Login, title);
+        item.username = username.trim().to_string();
+        item.password = password.to_string();
+        item.url = url.trim().to_string();
+        item.notes = auto_description(&item);
+        let title = item.title.clone();
+        match vault.add(item) {
+            Ok(_) => {
+                self.status = format!("Браузер: сохранена запись «{title}».");
+                browser::saved_json(true, &title)
+            }
+            Err(err) => browser::error_json(&format!("не удалось сохранить: {err}")),
+        }
+    }
+
+    /// Меняет пароль существующей записи.
+    fn browser_update_password(&mut self, id: Uuid, password: &str, url: &str) -> String {
+        let Some(vault) = self.vault.as_mut() else {
+            return browser::error_json("хранилище заблокировано");
+        };
+        let Some(item) = vault.get(id) else {
+            return browser::error_json("запись не найдена");
+        };
+        let mut updated = item.clone();
+        updated.password = password.to_string();
+        if updated.url.trim().is_empty() {
+            updated.url = url.trim().to_string();
+        }
+        let title = updated.title.clone();
+        match vault.update(updated) {
+            Ok(()) => {
+                self.status = format!("Браузер: пароль записи «{title}» обновлён.");
+                browser::saved_json(false, &title)
+            }
+            Err(err) => browser::error_json(&format!("не удалось обновить: {err}")),
+        }
+    }
+
     /// Палитра быстрого доступа (как Quick Access у 1Password): открывается
     /// глобальной клавишей из любого окна, фильтрует записи, сортирует
     /// подходящие целевому окну наверх и по Enter возвращает фокус окну
@@ -2975,6 +3536,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
+
+        // Запросы расширения браузера: разбор и диалоги поверх остального.
+        self.poll_browser_jobs(ui.ctx());
+        self.browser_dialog(ui.ctx());
 
         // F1 открывает и закрывает справку в любом месте программы. Событие
         // разбираем напрямую: так работает и при необычных модификаторах.

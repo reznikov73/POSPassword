@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Хранитель</title>
+  <style>
+    body {
+      width: 300px;
+      margin: 0;
+      padding: 14px;
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 13px;
+      color: #1a1d23;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      color: #265cb4;
+    }
+    .status {
+      padding: 8px 10px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+    }
+    .ok { background: #e5f2e6; color: #23522a; }
+    .err { background: #f7e5e4; color: #8c2b26; }
+    label {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 0;
+      cursor: pointer;
+    }
+    .hint {
+      margin-top: 10px;
+      color: #5c6270;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <h1>Хранитель — пароли</h1>
+  <div id="status" class="status err">Проверяем мост…</div>
+  <label>
+    <input type="checkbox" id="fill" checked>
+    Показывать иконку в полях входа
+  </label>
+  <label>
+    <input type="checkbox" id="save" checked>
+    Предлагать сохранить новые пароли
+  </label>
+  <div class="hint">
+    Записи приходят из приложения «Хранитель» и не сохраняются в браузере.
+    Быстрый доступ из любого окна — Ctrl+Shift+Space.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

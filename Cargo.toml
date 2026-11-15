@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/vault-core", "crates/vault-cli", "apps/vault-win", "tools/login-probe"]
+members = ["crates/vault-core", "crates/vault-cli", "apps/vault-win", "apps/browser-host", "tools/login-probe"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 
