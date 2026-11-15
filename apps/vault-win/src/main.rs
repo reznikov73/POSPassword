@@ -505,6 +505,10 @@ struct App {
     /// Диалог генератора паролей.
     gen_open: bool,
     gen_mode: GenMode,
+    /// Язык, для которого сейчас составлен образец фразы: по нему видно,
+    /// что образец устарел после смены языка (сравнивать текст нельзя —
+    /// после смены языка образец пересоздавался каждый кадр).
+    gen_sample_lang: Option<Wordlist>,
     gen_opts: GeneratorOptions,
     gen_phrase: PassphraseOptions,
     gen_result: String,
@@ -587,6 +591,7 @@ impl App {
             kind_filter: KindGroup::All,
             gen_open: false,
             gen_mode: GenMode::Chars,
+            gen_sample_lang: None,
             gen_opts: GeneratorOptions::default(),
             gen_phrase: PassphraseOptions::default(),
             gen_result: String::new(),
@@ -2102,6 +2107,7 @@ impl App {
         let mut generate = false;
         let opts_before = self.gen_opts;
         let phrase_before = self.gen_phrase;
+        let mode_before = self.gen_mode;
 
         egui::Window::new("Генератор паролей")
             .open(&mut open)
@@ -2228,12 +2234,18 @@ impl App {
             self.gen_result.zeroize();
             return;
         }
-        // Настройки поменяли — сразу показываем свежий образец.
+        // Настройки поменяли — сразу показываем свежий образец. Смену языка
+        // отслеживаем по отметке, а не по виду строки: иначе образец
+        // пересоздавался на каждом кадре и мелькал без остановки.
+        let language_changed = phrase_sample_stale(
+            self.gen_mode,
+            self.gen_sample_lang,
+            self.gen_phrase.language,
+        );
         if self.gen_opts != opts_before
             || self.gen_phrase != phrase_before
-            || self.gen_mode == GenMode::Phrase
-                && self.gen_result.is_ascii()
-                    != matches!(self.gen_phrase.language, Wordlist::Russian)
+            || self.gen_mode != mode_before
+            || language_changed
             || generate
         {
             self.regenerate();
@@ -2247,7 +2259,13 @@ impl App {
             GenMode::Phrase => generate_passphrase(&self.gen_phrase),
         };
         match result {
-            Ok(password) => self.gen_result = password,
+            Ok(password) => {
+                self.gen_sample_lang = match self.gen_mode {
+                    GenMode::Phrase => Some(self.gen_phrase.language),
+                    GenMode::Chars => None,
+                };
+                self.gen_result = password;
+            }
             Err(err) => self.status = format!("Не удалось сгенерировать: {err}"),
         }
     }
@@ -2970,4 +2988,52 @@ fn app_dir() -> PathBuf {
 
 fn default_vault_path() -> String {
     app_dir().join("vault.opvault").display().to_string()
+}
+
+/// Образец фразы устарел, если он составлен для другого языка.
+/// После `regenerate()` отметка совпадает с языком, и образец не пересоздаётся.
+/// Сравнивать сам текст нельзя: проверка «ascii или нет» всегда была истинной,
+/// и фраза пересоздавалась на каждом кадре — выглядело как бесконечный перебор.
+fn phrase_sample_stale(mode: GenMode, sample_lang: Option<Wordlist>, language: Wordlist) -> bool {
+    mode == GenMode::Phrase && sample_lang != Some(language)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_phrase_sample_is_not_regenerated() {
+        // После генерации отметка равна языку — образец стабилен.
+        assert!(!phrase_sample_stale(
+            GenMode::Phrase,
+            Some(Wordlist::Russian),
+            Wordlist::Russian
+        ));
+        assert!(!phrase_sample_stale(
+            GenMode::Phrase,
+            Some(Wordlist::English),
+            Wordlist::English
+        ));
+    }
+
+    #[test]
+    fn changing_language_marks_sample_as_stale() {
+        assert!(phrase_sample_stale(
+            GenMode::Phrase,
+            Some(Wordlist::English),
+            Wordlist::Russian
+        ));
+        assert!(phrase_sample_stale(
+            GenMode::Phrase,
+            None,
+            Wordlist::Russian
+        ));
+        // В режиме случайных символов отметка языка не важна.
+        assert!(!phrase_sample_stale(
+            GenMode::Chars,
+            None,
+            Wordlist::Russian
+        ));
+    }
 }
