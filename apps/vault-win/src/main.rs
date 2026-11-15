@@ -229,17 +229,19 @@ fn settings_path() -> PathBuf {
     app_dir().join("settings.txt")
 }
 
-/// Настройки программы: тема и сочетание клавиш автоввода.
-#[derive(Clone, Copy)]
+/// Настройки программы: тема, сочетание клавиш автоввода и последний путь к хранилищу.
+#[derive(Clone)]
 struct Settings {
     theme: Theme,
     hotkey: autotype::Hotkey,
+    vault_path: Option<String>,
 }
 
 fn load_settings() -> Settings {
     let mut settings = Settings {
         theme: Theme::Light,
         hotkey: autotype::Hotkey::default(),
+        vault_path: None,
     };
     let Ok(text) = std::fs::read_to_string(settings_path()) else {
         return settings;
@@ -269,13 +271,19 @@ fn load_settings() -> Settings {
                     settings.hotkey = hotkey;
                 }
             }
+            "path" => {
+                let path = value.trim();
+                if !path.is_empty() {
+                    settings.vault_path = Some(path.to_string());
+                }
+            }
             _ => {}
         }
     }
     settings
 }
 
-fn save_settings(theme: Theme, hotkey: autotype::Hotkey) {
+fn save_settings(theme: Theme, hotkey: autotype::Hotkey, vault_path: &str) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -284,10 +292,15 @@ fn save_settings(theme: Theme, hotkey: autotype::Hotkey) {
         Theme::Light => "light",
         Theme::Dark => "dark",
     };
-    let text = format!(
+    let mut text = format!(
         "theme={theme_value}\nhotkey={}\n",
         hotkey.label().to_lowercase()
     );
+    // Последний открытый файл: при следующем запуске поле уже заполнено.
+    let path = vault_path.trim();
+    if !path.is_empty() {
+        text.push_str(&format!("path={path}\n"));
+    }
     let _ = std::fs::write(dir.join("settings.txt"), text);
 }
 
@@ -465,18 +478,20 @@ struct App {
     export_result: Option<String>,
     /// Панель аудита хранилища.
     audit_open: bool,
-    /// Зарегистрирована ли горячая клавиша автоввода.
-    autotype_ready: bool,
-    /// Момент, когда надо выполнить автоввод после кнопки с отсчётом.
-    autotype_countdown: Option<Instant>,
-    /// Сообщение автоввода на несколько секунд поверх окна.
-    autotype_notice: Option<(String, Instant)>,
     /// Сочетание клавиш автоввода.
     hotkey: autotype::Hotkey,
     /// Диалог настроек.
     settings_open: bool,
     hotkey_draft: String,
     hotkey_error: Option<String>,
+    /// Идёт запись нового сочетания: следующее нажатие станет горячей клавишей.
+    hotkey_capture: bool,
+    /// Поставить курсор в поле сочетания при открытии настроек.
+    hotkey_focus: bool,
+    /// Момент, когда надо выполнить автоввод после кнопки с отсчётом.
+    autotype_countdown: Option<Instant>,
+    /// Сообщение автоввода на несколько секунд поверх окна.
+    autotype_notice: Option<(String, Instant)>,
     /// Фильтр списка по категории.
     kind_filter: KindGroup,
 }
@@ -486,26 +501,24 @@ impl App {
         let settings = load_settings();
         let theme = settings.theme;
         let hotkey = settings.hotkey;
+        let startup_path = settings
+            .vault_path
+            .clone()
+            .unwrap_or_else(default_vault_path);
         theme.apply(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
 
         // Горячая клавиша автоввода живёт, пока запущено приложение.
-        let (autotype_ready, status) = match autotype::start(cc.egui_ctx.clone(), hotkey) {
-            Ok(()) => (
-                true,
-                "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
-            ),
-            Err(err) => (
-                false,
-                format!(
-                    "Автоввод ({}) недоступен: {err}. Смените комбинацию в настройках. Введите мастер-пароль, чтобы открыть хранилище.",
-                    hotkey.label()
-                ),
+        let status = match autotype::start(cc.egui_ctx.clone(), hotkey) {
+            Ok(()) => "Введите мастер-пароль, чтобы открыть хранилище.".to_string(),
+            Err(err) => format!(
+                "Автоввод ({}) недоступен: {err}. Смените комбинацию в настройках. Введите мастер-пароль, чтобы открыть хранилище.",
+                hotkey.label()
             ),
         };
         Self {
             mode: Mode::Open,
-            path: default_vault_path(),
+            path: startup_path,
             password: String::new(),
             confirm: String::new(),
             vault: None,
@@ -537,13 +550,14 @@ impl App {
             export_password: String::new(),
             export_result: None,
             audit_open: false,
-            autotype_ready,
             autotype_countdown: None,
             autotype_notice: None,
             hotkey,
             settings_open: false,
             hotkey_draft: hotkey.label(),
             hotkey_error: None,
+            hotkey_capture: false,
+            hotkey_focus: false,
             kind_filter: KindGroup::All,
         }
     }
@@ -628,6 +642,9 @@ impl App {
                     Mode::Open => "Хранилище открыто.".to_string(),
                     Mode::Create => "Хранилище создано.".to_string(),
                 };
+                // Запоминаем файл: при следующем запуске поле уже заполнено.
+                self.path = vault.path().display().to_string();
+                save_settings(self.theme, self.hotkey, &self.path);
                 self.vault = Some(vault);
                 self.selected = first;
                 self.hello_pending = None;
@@ -647,9 +664,6 @@ impl App {
             let now = Instant::now();
             if now >= deadline {
                 self.autotype_countdown = None;
-                let message = autotype::run_now();
-                self.status = message.clone();
-                self.autotype_notice = Some((message, Instant::now()));
             } else {
                 let left = (deadline - now).as_secs_f32().ceil() as u64;
                 egui::Window::new("Автоввод через…")
@@ -888,7 +902,7 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey);
+                save_settings(self.theme, self.hotkey, &self.path);
             }
             if ui.small_button("Справка (F1)").clicked() {
                 self.help_open = true;
@@ -897,6 +911,8 @@ impl App {
                 self.settings_open = true;
                 self.hotkey_draft = self.hotkey.label();
                 self.hotkey_error = None;
+                self.hotkey_capture = false;
+                self.hotkey_focus = true;
             }
         });
     }
@@ -1005,7 +1021,7 @@ impl App {
                 if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                     self.theme = self.theme.toggled();
                     self.theme.apply(ui.ctx());
-                    save_settings(self.theme, self.hotkey);
+                    save_settings(self.theme, self.hotkey, &self.path);
                 }
                 if ui.button("Справка").clicked() {
                     self.help_open = true;
@@ -1014,6 +1030,8 @@ impl App {
                     self.settings_open = true;
                     self.hotkey_draft = self.hotkey.label();
                     self.hotkey_error = None;
+                    self.hotkey_capture = false;
+                    self.hotkey_focus = true;
                 }
             });
         });
@@ -1138,6 +1156,12 @@ impl App {
                                         )
                                         .clicked()
                                     {
+                                        // Печатает отдельный поток: отсчёт не зависит от кадров,
+                                        // поэтому работает и когда окно свёрнуто.
+                                        autotype::run_after(
+                                            Duration::from_secs(3),
+                                            ui.ctx().clone(),
+                                        );
                                         self.autotype_countdown =
                                             Some(Instant::now() + Duration::from_secs(3));
                                     }
@@ -1495,23 +1519,59 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(520.0)
+            .default_width(560.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label("Сочетание клавиш для автоввода");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.hotkey_draft)
-                        .hint_text("Ctrl+Alt+P")
-                        .desired_width(240.0),
-                );
+                ui.horizontal(|ui| {
+                    if self.hotkey_capture {
+                        ui.label(
+                            egui::RichText::new("Нажмите новое сочетание…")
+                                .strong()
+                                .size(16.0),
+                        );
+                    } else {
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut self.hotkey_draft)
+                                .hint_text("Ctrl+Alt+P")
+                                .desired_width(220.0),
+                        );
+                        if self.hotkey_focus {
+                            edit.request_focus();
+                            self.hotkey_focus = false;
+                        }
+                    }
+                    let label = if self.hotkey_capture {
+                        "Отменить запись"
+                    } else {
+                        "Записать сочетание"
+                    };
+                    if ui.button(label).clicked() {
+                        self.hotkey_capture = !self.hotkey_capture;
+                        self.hotkey_error = None;
+                    }
+                });
                 ui.label(
                     egui::RichText::new(
-                        "Например: Ctrl+Alt+P, Ctrl+Shift+F2. Нужен хотя бы один модификатор. Сейчас: ",
+                        "Можно просто нажать сочетание целиком или вписать его текстом: Ctrl+Alt+P, Ctrl+Shift+F2. Нужен хотя бы один модификатор.",
                     )
                     .weak()
                     .small(),
                 );
-                ui.label(egui::RichText::new(self.hotkey.label()).small().strong());
+                ui.label(
+                    egui::RichText::new(format!("Сейчас: {}", self.hotkey.label()))
+                        .small()
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(if autotype::is_ready() {
+                        "Клавиша зарегистрирована и работает."
+                    } else {
+                        "Клавиша сейчас не работает — комбинацию заняла другая программа."
+                    })
+                    .small()
+                    .weak(),
+                );
 
                 if let Some(error) = &self.hotkey_error {
                     ui.add_space(6.0);
@@ -1529,8 +1589,39 @@ impl App {
                 });
             });
 
+        // Пока идёт запись, следующая нажатая клавиша становится сочетанием.
+        if self.hotkey_capture {
+            let pressed = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+            });
+            if let Some((key, modifiers)) = pressed {
+                if key == egui::Key::Escape {
+                    self.hotkey_capture = false;
+                } else if let Some(hotkey) = autotype::Hotkey::from_egui(key, modifiers) {
+                    self.hotkey_capture = false;
+                    self.hotkey_draft = hotkey.label();
+                    self.apply_hotkey(hotkey);
+                } else {
+                    self.hotkey_error = Some(
+                        "нужны модификатор (Ctrl, Alt или Shift) и буква, цифра либо F1–F20"
+                            .to_string(),
+                    );
+                }
+            }
+            ctx.request_repaint();
+        }
+
         if cancel || !open {
             self.settings_open = false;
+            self.hotkey_capture = false;
             self.hotkey_error = None;
             return;
         }
@@ -1538,16 +1629,24 @@ impl App {
         if save {
             match autotype::Hotkey::parse(&self.hotkey_draft) {
                 Err(err) => self.hotkey_error = Some(err),
-                Ok(hotkey) => {
-                    autotype::rebind(hotkey);
-                    self.hotkey = hotkey;
-                    self.hotkey_draft = hotkey.label();
-                    self.hotkey_error = None;
-                    self.settings_open = false;
-                    save_settings(self.theme, self.hotkey);
-                    self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
-                }
+                Ok(hotkey) => self.apply_hotkey(hotkey),
             }
+        }
+    }
+
+    /// Ставит новое сочетание. Если оно занято, остаётся старое,
+    /// а ошибка показывается в диалоге — молча ничего не теряем.
+    fn apply_hotkey(&mut self, hotkey: autotype::Hotkey) {
+        match autotype::rebind(hotkey) {
+            Ok(()) => {
+                self.hotkey = hotkey;
+                self.hotkey_draft = hotkey.label();
+                self.hotkey_error = None;
+                self.settings_open = false;
+                save_settings(self.theme, self.hotkey, &self.path);
+                self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
+            }
+            Err(err) => self.hotkey_error = Some(err),
         }
     }
 
@@ -1905,21 +2004,22 @@ impl eframe::App for App {
         // F1 открывает и закрывает справку в любом месте программы. Событие
         // разбираем напрямую: так работает и при необычных модификаторах.
         // Ctrl+H — запасной вариант для ноутбуков, где F1 занята мультимедиа.
-        let f1_pressed = ui.ctx().input(|input| {
-            input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key {
-                        key: egui::Key::F1,
-                        pressed: true,
-                        repeat: false,
-                        ..
-                    }
-                )
-            })
-        }) || ui
-            .ctx()
-            .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::H));
+        let f1_pressed = !self.hotkey_capture
+            && (ui.ctx().input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::F1,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                })
+            }) || ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::H)));
         if f1_pressed {
             self.help_open = !self.help_open;
         }
@@ -1950,13 +2050,17 @@ impl eframe::App for App {
             self.status = format!("Файл для импорта: {}", path.display());
         }
         if self.vault.is_some()
+            && !self.hotkey_capture
             && ui
                 .ctx()
                 .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
         {
             self.focus_search = true;
         }
-        if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) && !self.help_open {
+        if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape))
+            && !self.help_open
+            && !self.hotkey_capture
+        {
             if self.password_open {
                 self.password_open = false;
             } else if self.export_open {
@@ -2001,7 +2105,7 @@ impl eframe::App for App {
             }
             ui.label(egui::RichText::new(&self.status).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let hint = if !self.autotype_ready {
+                let hint = if !autotype::is_ready() {
                     "автоввод недоступен".to_string()
                 } else if let Some(title) = self.autotype_title() {
                     format!("Автоввод: {title}")

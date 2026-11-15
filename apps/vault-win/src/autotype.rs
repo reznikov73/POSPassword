@@ -8,9 +8,10 @@
 //! Почему не в UI-кадре: когда окно свёрнуто, eframe не вызывает `ui()`,
 //! а автоввод должен работать именно из свёрнутого приложения.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use eframe::egui;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -117,6 +118,20 @@ impl Hotkey {
         }
         modifiers
     }
+
+    /// Сочетание из нажатия в окне настроек: egui отдаёт клавишу и модификаторы.
+    /// Возвращает None, если модификатора нет или такую клавишу не зарегистрировать.
+    pub fn from_egui(key: egui::Key, modifiers: egui::Modifiers) -> Option<Self> {
+        if !modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+            return None;
+        }
+        Some(Self {
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            key: vk_from_egui(key)?,
+        })
+    }
 }
 
 fn parse_key(name: &str) -> Result<u32, String> {
@@ -146,6 +161,71 @@ fn key_name(key: u32) -> String {
     char::from_u32(key)
         .map(|ch| ch.to_string())
         .unwrap_or_else(|| format!("0x{key:02X}"))
+}
+
+/// Виртуальный код Win32 для клавиши egui. Поддерживаем то, что умеет
+/// разбор текста: буквы, цифры и F1–F20 (их хватает для глобальных сочетаний).
+fn vk_from_egui(key: egui::Key) -> Option<u32> {
+    use egui::Key;
+    Some(match key {
+        Key::A => 0x41,
+        Key::B => 0x42,
+        Key::C => 0x43,
+        Key::D => 0x44,
+        Key::E => 0x45,
+        Key::F => 0x46,
+        Key::G => 0x47,
+        Key::H => 0x48,
+        Key::I => 0x49,
+        Key::J => 0x4A,
+        Key::K => 0x4B,
+        Key::L => 0x4C,
+        Key::M => 0x4D,
+        Key::N => 0x4E,
+        Key::O => 0x4F,
+        Key::P => 0x50,
+        Key::Q => 0x51,
+        Key::R => 0x52,
+        Key::S => 0x53,
+        Key::T => 0x54,
+        Key::U => 0x55,
+        Key::V => 0x56,
+        Key::W => 0x57,
+        Key::X => 0x58,
+        Key::Y => 0x59,
+        Key::Z => 0x5A,
+        Key::Num0 => 0x30,
+        Key::Num1 => 0x31,
+        Key::Num2 => 0x32,
+        Key::Num3 => 0x33,
+        Key::Num4 => 0x34,
+        Key::Num5 => 0x35,
+        Key::Num6 => 0x36,
+        Key::Num7 => 0x37,
+        Key::Num8 => 0x38,
+        Key::Num9 => 0x39,
+        Key::F1 => 0x70,
+        Key::F2 => 0x71,
+        Key::F3 => 0x72,
+        Key::F4 => 0x73,
+        Key::F5 => 0x74,
+        Key::F6 => 0x75,
+        Key::F7 => 0x76,
+        Key::F8 => 0x77,
+        Key::F9 => 0x78,
+        Key::F10 => 0x79,
+        Key::F11 => 0x7A,
+        Key::F12 => 0x7B,
+        Key::F13 => 0x7C,
+        Key::F14 => 0x7D,
+        Key::F15 => 0x7E,
+        Key::F16 => 0x7F,
+        Key::F17 => 0x80,
+        Key::F18 => 0x81,
+        Key::F19 => 0x82,
+        Key::F20 => 0x83,
+        _ => return None,
+    })
 }
 
 /// Что печатать по горячей клавише: заголовок для отчёта и сами данные.
@@ -183,11 +263,30 @@ fn shared() -> &'static Shared {
 
 /// Идентификатор потока горячей клавиши — ему адресуются команды переназначения.
 static HOTKEY_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Зарегистрирована ли клавиша прямо сейчас (поток обновляет после каждой попытки).
+static READY: AtomicBool = AtomicBool::new(false);
 /// Текущее сочетание для показа в интерфейсе.
 static CURRENT: OnceLock<Mutex<Hotkey>> = OnceLock::new();
 
 fn current() -> &'static Mutex<Hotkey> {
     CURRENT.get_or_init(|| Mutex::new(Hotkey::default()))
+}
+
+/// Запрос на смену сочетания: поток отвечает, получилось ли зарегистрировать.
+struct RebindRequest {
+    hotkey: Hotkey,
+    reply: std::sync::mpsc::Sender<Result<(), String>>,
+}
+
+fn rebind_slot() -> &'static Mutex<Option<RebindRequest>> {
+    static SLOT: OnceLock<Mutex<Option<RebindRequest>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Готова ли горячая клавиша к работе. UI спрашивает это каждый кадр,
+/// поэтому подсказка в строке состояния не врёт после смены сочетания.
+pub fn is_ready() -> bool {
+    READY.load(Ordering::SeqCst)
 }
 
 /// Регистрирует горячую клавишу и запускает поток ожидания нажатия.
@@ -208,14 +307,15 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
 
         HOTKEY_THREAD.store(current_thread_id(), Ordering::SeqCst);
 
-        let mut active = hotkey;
-        let registered = unsafe { RegisterHotKey(None, HOTKEY_ID, active.modifiers(), active.key) };
-        let _ = sender.send((registered.is_ok(), active));
-        if registered.is_err() {
-            // Ждём команд переназначения — вдруг пользователь выберет другую.
-            wait_loop(&ctx);
-            return;
+        // Если сочетание занято, поток всё равно остаётся живым: пользователь
+        // выберет другое в настройках, и регистрация произойдёт на месте.
+        let mut active = None;
+        let registered = unsafe { RegisterHotKey(None, HOTKEY_ID, hotkey.modifiers(), hotkey.key) };
+        if registered.is_ok() {
+            active = Some(hotkey);
+            READY.store(true, Ordering::SeqCst);
         }
+        let _ = sender.send((registered.is_ok(), hotkey));
 
         loop {
             let mut message = MSG::default();
@@ -232,38 +332,27 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
                     ctx.request_repaint();
                 }
                 WM_REBIND => {
-                    let next = shared()
-                        .binding
-                        .lock()
-                        .map(|binding| *binding)
-                        .unwrap_or(active);
-                    if next == active {
+                    let request = rebind_slot().lock().ok().and_then(|mut slot| slot.take());
+                    let Some(request) = request else {
                         continue;
+                    };
+                    let outcome = apply_binding(&mut active, request.hotkey);
+                    if let Ok(mut slot) = shared().message.lock() {
+                        *slot = Some(match &outcome {
+                            Ok(()) => {
+                                format!("Автоввод: новая комбинация {}", request.hotkey.label())
+                            }
+                            Err(error) => format!("Автоввод: {error}"),
+                        });
                     }
-                    unsafe {
-                        let _ = UnregisterHotKey(None, HOTKEY_ID);
-                        let ok =
-                            RegisterHotKey(None, HOTKEY_ID, next.modifiers(), next.key).is_ok();
-                        let text = if ok {
-                            *current().lock().expect("мьютекс текущей клавиши") = next;
-                            active = next;
-                            format!("Автоввод: новая комбинация {}", next.label())
-                        } else {
-                            // Старая уже снята — честно сообщаем, что клавиши нет.
-                            format!(
-                                "Автоввод: комбинация {} занята другой программой",
-                                next.label()
-                            )
-                        };
-                        if let Ok(mut slot) = shared().message.lock() {
-                            *slot = Some(text);
-                        }
-                        ctx.request_repaint();
-                    }
+                    let _ = request.reply.send(outcome);
+                    ctx.request_repaint();
                 }
                 _ => {}
             }
         }
+
+        READY.store(false, Ordering::SeqCst);
     });
 
     match receiver.recv() {
@@ -276,57 +365,90 @@ pub fn start(ctx: egui::Context, hotkey: Hotkey) -> Result<(), String> {
     }
 }
 
-/// Цикл ожидания команд, когда клавиша не зарегистрирована.
-fn wait_loop(ctx: &egui::Context) {
-    loop {
-        let mut message = MSG::default();
-        let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
-        if result.0 <= 0 {
-            break;
-        }
-        if message.message == WM_REBIND {
-            let next = shared()
-                .binding
-                .lock()
-                .map(|binding| *binding)
-                .unwrap_or_default();
-            unsafe {
-                if RegisterHotKey(None, HOTKEY_ID, next.modifiers(), next.key).is_ok() {
-                    *current().lock().expect("мьютекс текущей клавиши") = next;
-                    if let Ok(mut slot) = shared().message.lock() {
-                        *slot = Some(format!("Автоввод: комбинация {}", next.label()));
-                    }
-                    ctx.request_repaint();
-                    return;
-                }
-                if let Ok(mut slot) = shared().message.lock() {
-                    *slot = Some(format!(
-                        "Автоввод: комбинация {} занята другой программой",
-                        next.label()
-                    ));
-                }
-                ctx.request_repaint();
-            }
-        }
+/// Снимает прежнюю регистрацию и ставит новую. Если новая занята, старая
+/// возвращается на место — иначе пользователь остался бы вообще без автоввода.
+fn apply_binding(active: &mut Option<Hotkey>, requested: Hotkey) -> Result<(), String> {
+    let previous = *active;
+    if previous == Some(requested) && is_ready() {
+        return Ok(());
     }
+
+    unsafe {
+        let _ = UnregisterHotKey(None, HOTKEY_ID);
+    }
+    READY.store(false, Ordering::SeqCst);
+    *active = None;
+
+    let registered =
+        unsafe { RegisterHotKey(None, HOTKEY_ID, requested.modifiers(), requested.key) };
+    if registered.is_ok() {
+        *active = Some(requested);
+        *current().lock().expect("мьютекс текущей клавиши") = requested;
+        READY.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+
+    let mut restored = false;
+    if let Some(previous) = previous
+        && unsafe { RegisterHotKey(None, HOTKEY_ID, previous.modifiers(), previous.key) }.is_ok()
+    {
+        *active = Some(previous);
+        restored = true;
+        READY.store(true, Ordering::SeqCst);
+    }
+
+    Err(if restored {
+        format!(
+            "комбинация {} занята другой программой — осталась {}",
+            requested.label(),
+            previous.map(Hotkey::label).unwrap_or_default()
+        )
+    } else {
+        format!("комбинация {} занята другой программой", requested.label())
+    })
 }
 
-/// Просит поток перерегистрировать сочетание.
-pub fn rebind(hotkey: Hotkey) {
+/// Просит поток перерегистрировать сочетание и дожидается ответа.
+/// Ошибка означает, что комбинация не встала (старая при этом сохраняется).
+pub fn rebind(hotkey: Hotkey) -> Result<(), String> {
     if let Ok(mut binding) = shared().binding.lock() {
         *binding = hotkey;
     }
     let thread_id = HOTKEY_THREAD.load(Ordering::SeqCst);
-    if thread_id != 0 {
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                thread_id,
-                WM_REBIND,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(0),
-            );
-        }
+    if thread_id == 0 {
+        return Err("поток автоввода ещё не запущен".to_string());
     }
+
+    let (reply, answer) = std::sync::mpsc::channel();
+    if let Ok(mut slot) = rebind_slot().lock() {
+        *slot = Some(RebindRequest { hotkey, reply });
+    }
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+            thread_id,
+            WM_REBIND,
+            windows::Win32::Foundation::WPARAM(0),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+    }
+
+    match answer.recv_timeout(Duration::from_millis(800)) {
+        Ok(result) => result,
+        Err(_) => Err("поток автоввода не ответил на смену комбинации".to_string()),
+    }
+}
+
+/// Один автоввод по таймеру: не зависит от кадров UI, поэтому работает
+/// и из свёрнутого окна (в свёрнутом виде egui не вызывает `ui()`).
+pub fn run_after(delay: Duration, ctx: egui::Context) {
+    thread::spawn(move || {
+        thread::sleep(delay);
+        let text = autotype_once();
+        if let Ok(mut slot) = shared().message.lock() {
+            *slot = Some(text);
+        }
+        ctx.request_repaint();
+    });
 }
 
 /// Отдаёт потоку горячей клавиши актуальное состояние. Вызывается из UI.
@@ -354,11 +476,6 @@ pub fn take_message() -> Option<String> {
         .lock()
         .ok()
         .and_then(|mut slot| slot.take())
-}
-
-/// Один автоввод по запросу из UI (кнопка с отсчётом).
-pub fn run_now() -> String {
-    autotype_once()
 }
 
 /// Один автоввод: берёт текущую запись и печатает её в активное окно.
@@ -400,6 +517,11 @@ fn autotype_once() -> String {
 }
 
 fn type_credentials(username: &str, password: &str) -> Result<(), String> {
+    // Горячая клавиша приходит в момент нажатия, когда Ctrl/Alt ещё зажаты.
+    // Если начать печатать сразу, Windows отдаёт символы как сочетания
+    // (Ctrl+U, Alt+P…), и в чужом окне не появляется ничего.
+    wait_for_modifiers_release(Duration::from_millis(1200));
+
     if foreground_is_ours() {
         return Err("активно окно «Хранителя» — переключитесь в целевое окно".to_string());
     }
@@ -411,6 +533,27 @@ fn type_credentials(username: &str, password: &str) -> Result<(), String> {
     send_text(password)?;
     send_virtual(VK_RETURN)?;
     Ok(())
+}
+
+/// Ждёт, пока пользователь отпустит Ctrl, Alt, Shift и Win.
+fn wait_for_modifiers_release(timeout: Duration) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let keys = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN];
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        let pressed = keys
+            .iter()
+            .any(|key| unsafe { (GetAsyncKeyState(key.0 as i32) as u16) & 0x8000 != 0 });
+        if !pressed {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Небольшая пауза, чтобы целевое окно успело получить key-up.
+    thread::sleep(Duration::from_millis(40));
 }
 
 fn foreground_is_ours() -> bool {
@@ -523,5 +666,41 @@ mod tests {
         assert!(Hotkey::parse("P").is_err());
         assert!(Hotkey::parse("Ctrl+Alt").is_err());
         assert!(Hotkey::parse("Ctrl+Alt+pp").is_err());
+    }
+
+    #[test]
+    fn builds_binding_from_a_pressed_combination() {
+        let modifiers = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let hotkey = Hotkey::from_egui(egui::Key::F2, modifiers).expect("сочетание");
+        assert_eq!(hotkey.label(), "Ctrl+Shift+F2");
+        assert_eq!(hotkey, Hotkey::parse("ctrl+shift+f2").expect("разбор"));
+    }
+
+    #[test]
+    fn ignores_presses_without_modifier_or_unsupported_keys() {
+        assert!(Hotkey::from_egui(egui::Key::P, egui::Modifiers::NONE).is_none());
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(Hotkey::from_egui(egui::Key::ArrowLeft, ctrl).is_none());
+    }
+
+    #[test]
+    fn rebinding_replaces_the_registered_combination() {
+        let first = Hotkey::parse("Ctrl+Alt+F9").expect("разбор первой");
+        let second = Hotkey::parse("Ctrl+Alt+F10").expect("разбор второй");
+        let _ = start(egui::Context::default(), first);
+
+        rebind(second).expect("новая комбинация должна встать");
+        assert_eq!(current().lock().expect("мьютекс").label(), "Ctrl+Alt+F10");
+        assert!(is_ready());
+
+        rebind(first).expect("возврат на прежнюю комбинацию");
+        assert_eq!(current().lock().expect("мьютекс").label(), "Ctrl+Alt+F9");
     }
 }
