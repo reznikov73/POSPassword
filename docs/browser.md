@@ -67,7 +67,7 @@ JSON. Действия — kebab-case.
    хранилище любые запросы получают отказ; висящий в диалоге запрос
    тоже закрывается отказом.
 
-## Установка (Chrome / Edge)
+## Установка (Chrome / Edge / Яндекс Браузер)
 
 1. Соберите хост: `cargo build --release -p browser-host` (в готовом
    пакете `dist\Hranitel-<версия>-win64` уже лежат `browser-host.exe`,
@@ -97,6 +97,14 @@ JSON. Действия — kebab-case.
 Скрипт пишет манифест в `%APPDATA%\Hranitel\browser-host\ru.hranitel.bridge.json`
 и два ключа реестра `HKCU\…\NativeMessagingHosts\ru.hranitel.bridge`.
 Удаление моста — удалить ключи реестра и папку манифеста.
+
+**Яндекс Браузер.** Он собран на Chromium и ищет родные хосты по ключу
+Chrome — в `browser.dll` прописаны `SOFTWARE\Google\Chrome\NativeMessagingHosts`
+и `SOFTWARE\Chromium\NativeMessagingHosts`. Отдельный ключ Яндекса не нужен:
+достаточно `-Browsers chrome` (алиас `yandex` делает то же самое).
+Расширение ставится так же: `browser://extensions` → «Режим разработчика» →
+«Загрузить распакованное расширение»; ID показывается на карточке.
+Если после создания ключа браузер уже был запущен — перезапустите его.
 
 ## Ограничения и планы
 

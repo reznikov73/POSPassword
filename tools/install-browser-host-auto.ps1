@@ -14,7 +14,7 @@
 #   pwsh -File .\tools\install-browser-host-auto.ps1 -Browsers chrome -DryRun
 
 param(
-    [string[]]$Browsers = @("chrome", "edge"),
+    [string[]]$Browsers = @("chrome", "edge", "yandex"),
 
     # Папка расширения; по умолчанию — ..\extension рядом со скриптом.
     [string]$ExtensionDir,
@@ -55,25 +55,26 @@ function Test-SamePath([string]$left, [string]$right) {
     return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-# Ищет в Preferences распакованные расширения (location=4) с нашим путём.
+# Ищет в Preferences/Secure Preferences распакованные расширения (location=4)
+# с нашим путём. Secure Preferences содержит ключи, различающиеся регистром,
+# поэтому разбор — в хэш-таблицу, иначе ConvertFrom-Json падает.
 function Find-UnpackedExtensionId([string]$prefsFile, [string]$extensionDir) {
     if (-not (Test-Path $prefsFile)) { return $null }
     try {
-        $json = Get-Content -Raw -Encoding utf8 $prefsFile | ConvertFrom-Json
+        $json = Get-Content -Raw -Encoding utf8 $prefsFile | ConvertFrom-Json -AsHashtable
     } catch {
         return $null
     }
-    $settings = $json.extensions.settings
-    if (-not $settings) { return $null }
+    if (-not $json -or -not $json.ContainsKey('extensions')) { return $null }
+    $extensions = $json['extensions']
+    if (-not $extensions -or -not $extensions.ContainsKey('settings')) { return $null }
 
-    foreach ($entry in $settings.PSObject.Properties) {
+    foreach ($entry in $extensions['settings'].GetEnumerator()) {
         $value = $entry.Value
         if (-not $value) { continue }
-        $location = $value.location
-        $path = $value.path
-        if ($null -ne $location -and $location -ne 4) { continue }
-        if (-not (Test-SamePath $path $extensionDir)) { continue }
-        $id = $entry.Name
+        if ($value.ContainsKey('location') -and $value['location'] -ne 4) { continue }
+        if (-not (Test-SamePath $value['path'] $extensionDir)) { continue }
+        $id = $entry.Key
         if ($id -match '^[a-p]{32}$') { return $id }
     }
     return $null
@@ -84,14 +85,19 @@ function Get-ProfileFiles([string]$browser) {
     $root = switch ($browser) {
         "chrome" { Join-Path $local "Google\Chrome\User Data" }
         "edge" { Join-Path $local "Microsoft\Edge\User Data" }
+        "yandex" { Join-Path $local "Yandex\YandexBrowser\User Data" }
         default { $null }
     }
     if (-not $root -or -not (Test-Path $root)) { return @() }
     $files = @()
-    $files += Join-Path $root "Default\Preferences"
-    $files += Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "Profile *" } |
-        ForEach-Object { Join-Path $_.FullName "Preferences" }
+    $profiles = @("Default") + @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "Profile *" } | ForEach-Object { $_.Name })
+    foreach ($profile in $profiles) {
+        # Настройки расширений Chromium держит в Secure Preferences,
+        # а обычный Preferences — только общие настройки.
+        $files += Join-Path $root "$profile\Secure Preferences"
+        $files += Join-Path $root "$profile\Preferences"
+    }
     return $files | Where-Object { Test-Path $_ }
 }
 

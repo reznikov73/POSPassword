@@ -36,7 +36,7 @@ if ($ExtensionId -notmatch '^[a-p]{32}$') {
     Write-Warning "Идентификатор расширения выглядит необычно (обычно 32 буквы a–p): $ExtensionId"
 }
 
-$targetDir = Join-Path $env:APPDATA "Hranitel\browser-host"
+$targetDir = Join-Path $(if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\Roaming" }) "Hranitel\browser-host"
 New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 
 $manifest = @{
@@ -54,7 +54,10 @@ foreach ($browser in $Browsers) {
     switch ($browser) {
         "chrome" { $key = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\ru.hranitel.bridge" }
         "edge" { $key = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\ru.hranitel.bridge" }
-        default { Write-Warning "Неизвестный браузер: $browser (поддерживаются chrome, edge)"; continue }
+        # Яндекс Браузер — Chromium-сборка и ищет хосты по ключу Chrome
+        # (в browser.dll: SOFTWARE\Google\Chrome\NativeMessagingHosts).
+        "yandex" { $key = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\ru.hranitel.bridge" }
+        default { Write-Warning "Неизвестный браузер: $browser (поддерживаются chrome, edge, yandex)"; continue }
     }
     New-Item -Path $key -Force | Out-Null
     Set-ItemProperty -Path $key -Name "(default)" -Value $manifestPath
