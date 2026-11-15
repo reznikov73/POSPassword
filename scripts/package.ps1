@@ -31,7 +31,7 @@ try {
 
     # Мост к браузеру: родной хост и распакованное расширение.
     Copy-Item 'target\release\browser-host.exe' $dst
-    Copy-Item 'tools\install-browser-host.ps1' $tools
+    Copy-Item 'tools\install-browser-host.ps1', 'tools\install-browser-host-auto.ps1' $tools
     Copy-Item 'extension' $dst -Recurse
 
     $zip = Join-Path 'dist' "Hranitel-$Version-win64.zip"
