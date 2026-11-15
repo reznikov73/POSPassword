@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use uuid::Uuid;
 use vault_core::{
-    ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, Totp, Vault, expiries,
-    generate_password, generate_wrapping_key, import_file, now_secs, protected_wrapping_key,
-    sidecar_path,
+    ExportFormat, Field, GeneratorOptions, ImportFormat, Item, ItemKind, PassphraseOptions,
+    Separator, Totp, Vault, Wordlist, auto_description, expiries, generate_passphrase,
+    generate_password, generate_wrapping_key, import_file, now_secs, parse_credentials,
+    passphrase_entropy_bits, password_entropy_bits, protected_wrapping_key, sidecar_path,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -104,6 +105,13 @@ enum Mode {
 enum Theme {
     Light,
     Dark,
+}
+
+/// Режим генератора паролей: случайные символы или запоминаемая фраза.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenMode {
+    Chars,
+    Phrase,
 }
 
 impl Theme {
@@ -494,6 +502,24 @@ struct App {
     autotype_notice: Option<(String, Instant)>,
     /// Фильтр списка по категории.
     kind_filter: KindGroup,
+    /// Диалог генератора паролей.
+    gen_open: bool,
+    gen_mode: GenMode,
+    gen_opts: GeneratorOptions,
+    gen_phrase: PassphraseOptions,
+    gen_result: String,
+    /// Диалог быстрой вставки логина и пароля.
+    quick_open: bool,
+    quick_text: String,
+    /// Поля быстрой вставки — редактируются после разбора.
+    quick_title: String,
+    quick_username: String,
+    quick_password: String,
+    quick_url: String,
+    /// Диалог массового добавления описаний.
+    desc_open: bool,
+    /// Запрос на описание одной записи из карточки.
+    describe_one: Option<Uuid>,
 }
 
 impl App {
@@ -559,6 +585,19 @@ impl App {
             hotkey_capture: false,
             hotkey_focus: false,
             kind_filter: KindGroup::All,
+            gen_open: false,
+            gen_mode: GenMode::Chars,
+            gen_opts: GeneratorOptions::default(),
+            gen_phrase: PassphraseOptions::default(),
+            gen_result: String::new(),
+            quick_open: false,
+            quick_text: String::new(),
+            quick_title: String::new(),
+            quick_username: String::new(),
+            quick_password: String::new(),
+            quick_url: String::new(),
+            desc_open: false,
+            describe_one: None,
         }
     }
 
@@ -577,6 +616,13 @@ impl App {
         self.import_open = false;
         self.import_result = None;
         self.hello_pending = None;
+        // Секреты из генератора и быстрой вставки не живут в заблокированном окне.
+        self.gen_open = false;
+        self.gen_result.zeroize();
+        self.quick_open = false;
+        self.quick_text.zeroize();
+        self.quick_password.zeroize();
+        self.desc_open = false;
     }
 
     fn copy(&mut self, text: &str, label: &str) {
@@ -951,89 +997,117 @@ impl App {
                 if ui.button("Заблокировать").clicked() {
                     lock_requested = true;
                 }
-                if ui.button("Импорт").on_hover_text("Импорт из Bitwarden или 1Password").clicked() {
-                    self.import_open = true;
-                    self.import_result = None;
-                }
-                if ui
-                    .button("Экспорт")
-                    .on_hover_text("Копия в JSON или CSV")
-                    .clicked()
-                {
-                    self.export_open = true;
-                    self.export_result = None;
-                    self.export_password.clear();
-                    if self.export_path.is_empty() {
-                        self.export_path = default_export_path(vault.path(), self.export_format);
-                    }
-                }
-                if ui
-                    .button("Аудит")
-                    .on_hover_text("Слабые и повторяющиеся пароли, сроки действия")
-                    .clicked()
-                {
-                    self.audit_open = true;
-                }
-                if ui
-                    .button("Пароль")
-                    .on_hover_text("Сменить мастер-пароль")
-                    .clicked()
-                {
-                    self.password_open = true;
-                    self.password_error = None;
-                    self.password_current.clear();
-                    self.password_new.clear();
-                    self.password_confirm.clear();
-                }
-                let hello_on = sidecar_path(vault.path()).exists();
-                let hello_label = if hello_on { "Hello: вкл" } else { "Hello: выкл" };
-                if ui
-                    .button(hello_label)
-                    .on_hover_text("Разблокировка без мастер-пароля через Windows Hello")
-                    .clicked()
-                {
-                    if hello_on {
-                        match vault.disable_hello() {
-                            Ok(()) => {
-                                self.status = "Вход через Windows Hello выключен.".to_string();
-                            }
-                            Err(err) => {
-                                self.status = format!("Не удалось выключить Hello: {err}");
-                            }
-                        }
-                    } else {
-                        let wrapping = generate_wrapping_key();
-                        match hello_win::dpapi_protect(&wrapping) {
-                            Ok(blob) => match vault.enable_hello(&wrapping, &blob) {
-                                Ok(()) => {
-                                    self.status = "Вход через Windows Hello включён. При следующем запуске мастер-пароль не понадобится.".to_string();
-                                }
-                                Err(err) => {
-                                    self.status = format!("Не удалось включить Hello: {err}");
-                                }
-                            },
-                            Err(err) => {
-                                self.status = format!("Не удалось защитить ключ: {err}");
-                            }
-                        }
-                    }
-                }
-                if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
-                    self.theme = self.theme.toggled();
-                    self.theme.apply(ui.ctx());
-                    save_settings(self.theme, self.hotkey, &self.path);
-                }
-                if ui.button("Справка").clicked() {
-                    self.help_open = true;
-                }
-                if ui.button("Настройки").clicked() {
-                    self.settings_open = true;
-                    self.hotkey_draft = self.hotkey.label();
-                    self.hotkey_error = None;
-                    self.hotkey_capture = false;
-                    self.hotkey_focus = true;
-                }
             });
+        });
+        // Действия — второй строкой с переносом: даже в узком окне кнопки
+        // не наезжают на путь к хранилищу.
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Быстрая вставка")
+                .on_hover_text("Разобрать скопированный логин и пароль и создать запись")
+                .clicked()
+            {
+                self.quick_open = true;
+            }
+            if ui
+                .button("Генератор")
+                .on_hover_text("Случайный пароль или запоминаемая фраза из слов")
+                .clicked()
+            {
+                self.gen_open = true;
+                if self.gen_result.is_empty() {
+                    self.regenerate();
+                }
+            }
+            if ui
+                .button("Описания")
+                .on_hover_text("Осмысленные описания для записей без заметок")
+                .clicked()
+            {
+                self.desc_open = true;
+            }
+            if ui
+                .button("Аудит")
+                .on_hover_text("Слабые и повторяющиеся пароли, сроки действия")
+                .clicked()
+            {
+                self.audit_open = true;
+            }
+            if ui
+                .button("Импорт")
+                .on_hover_text("Импорт из Bitwarden или 1Password")
+                .clicked()
+            {
+                self.import_open = true;
+                self.import_result = None;
+            }
+            if ui.button("Экспорт").on_hover_text("Копия в JSON или CSV").clicked() {
+                self.export_open = true;
+                self.export_result = None;
+                self.export_password.clear();
+                if self.export_path.is_empty() {
+                    self.export_path = default_export_path(vault.path(), self.export_format);
+                }
+            }
+            if ui
+                .button("Пароль")
+                .on_hover_text("Сменить мастер-пароль")
+                .clicked()
+            {
+                self.password_open = true;
+                self.password_error = None;
+                self.password_current.clear();
+                self.password_new.clear();
+                self.password_confirm.clear();
+            }
+            let hello_on = sidecar_path(vault.path()).exists();
+            let hello_label = if hello_on { "Hello: вкл" } else { "Hello: выкл" };
+            if ui
+                .button(hello_label)
+                .on_hover_text("Разблокировка без мастер-пароля через Windows Hello")
+                .clicked()
+            {
+                if hello_on {
+                    match vault.disable_hello() {
+                        Ok(()) => {
+                            self.status = "Вход через Windows Hello выключен.".to_string();
+                        }
+                        Err(err) => {
+                            self.status = format!("Не удалось выключить Hello: {err}");
+                        }
+                    }
+                } else {
+                    let wrapping = generate_wrapping_key();
+                    match hello_win::dpapi_protect(&wrapping) {
+                        Ok(blob) => match vault.enable_hello(&wrapping, &blob) {
+                            Ok(()) => {
+                                self.status = "Вход через Windows Hello включён. При следующем запуске мастер-пароль не понадобится.".to_string();
+                            }
+                            Err(err) => {
+                                self.status = format!("Не удалось включить Hello: {err}");
+                            }
+                        },
+                        Err(err) => {
+                            self.status = format!("Не удалось защитить ключ: {err}");
+                        }
+                    }
+                }
+            }
+            if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
+                self.theme = self.theme.toggled();
+                self.theme.apply(ui.ctx());
+                save_settings(self.theme, self.hotkey, &self.path);
+            }
+            if ui.button("Справка").clicked() {
+                self.help_open = true;
+            }
+            if ui.button("Настройки").clicked() {
+                self.settings_open = true;
+                self.hotkey_draft = self.hotkey.label();
+                self.hotkey_error = None;
+                self.hotkey_capture = false;
+                self.hotkey_focus = true;
+            }
         });
         ui.separator();
 
@@ -1086,11 +1160,19 @@ impl App {
                     });
                     ui.add_space(6.0);
 
-                    let items: Vec<(Uuid, String, String, ItemKind)> = vault
+                    let items: Vec<(Uuid, String, String, ItemKind, String)> = vault
                         .search(&self.query)
                         .into_iter()
                         .filter(|item| self.kind_filter.matches(item.kind))
-                        .map(|i| (i.id, i.title.clone(), i.username.clone(), i.kind))
+                        .map(|i| {
+                            (
+                                i.id,
+                                i.title.clone(),
+                                i.username.clone(),
+                                i.kind,
+                                notes_snippet(&i.notes),
+                            )
+                        })
                         .collect();
 
                     egui::ScrollArea::vertical()
@@ -1100,13 +1182,27 @@ impl App {
                             if items.is_empty() {
                                 ui.label(egui::RichText::new("Ничего не найдено").weak());
                             }
-                            for (id, title, username, kind) in &items {
-                                let label = if !username.is_empty() {
-                                    format!("{title}\n{username}")
-                                } else if matches!(kind, ItemKind::Login | ItemKind::SecureNote) {
+                            for (id, title, username, kind, snippet) in &items {
+                                // Второй строкой — логин или тип записи, затем краткое
+                                // описание из заметки, чтобы список сразу был говорящим.
+                                let mut second = if !username.is_empty() {
+                                    username.clone()
+                                } else if !matches!(kind, ItemKind::Login | ItemKind::SecureNote)
+                                {
+                                    kind.label().to_string()
+                                } else {
+                                    String::new()
+                                };
+                                if !snippet.is_empty() {
+                                    if !second.is_empty() {
+                                        second.push_str(" · ");
+                                    }
+                                    second.push_str(snippet);
+                                }
+                                let label = if second.is_empty() {
                                     title.clone()
                                 } else {
-                                    format!("{title}\n{}", kind.label())
+                                    format!("{title}\n{second}")
                                 };
                                 if ui
                                     .selectable_label(self.selected == Some(*id), label)
@@ -1224,6 +1320,15 @@ impl App {
                                         if ui.small_button("Копировать").clicked() {
                                             self.copy(&item.password, "Пароль");
                                         }
+                                        let bits = password_entropy_bits(&item.password);
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "≈ {bits:.0} бит · {}",
+                                                strength_word(bits)
+                                            ))
+                                            .small()
+                                            .color(strength_color(bits)),
+                                        );
                                     });
                                     ui.end_row();
                                 }
@@ -1306,14 +1411,47 @@ impl App {
                                 }
                             });
 
-                        if !item.notes.is_empty() {
-                            ui.add_space(12.0);
-                            ui.label("Заметки");
+                        ui.add_space(12.0);
+                        ui.label("Заметки");
+                        if item.notes.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Пусто — можно составить осмысленное описание автоматически.",
+                                    )
+                                    .weak()
+                                    .small(),
+                                );
+                                if ui
+                                    .small_button("Описать")
+                                    .on_hover_text("Собрать описание из данных записи")
+                                    .clicked()
+                                {
+                                    self.describe_one = Some(item.id);
+                                }
+                            });
+                        } else {
                             ui.label(&item.notes);
                         }
                     });
             });
         });
+
+        // Кнопка «Описать» из карточки: описание пишется в заметки записи.
+        if let Some(id) = self.describe_one.take()
+            && let Some(item) = vault.get(id)
+        {
+            let mut updated = item.clone();
+            updated.notes = auto_description(&updated);
+            match vault.update(updated) {
+                Ok(()) => {
+                    self.status =
+                        "Описание добавлено в заметки — поправьте его кнопкой «Изменить»."
+                            .to_string();
+                }
+                Err(err) => self.status = format!("Не удалось добавить описание: {err}"),
+            }
+        }
 
         if let Some(id) = self.confirm_delete {
             let title = vault.get(id).map(|i| i.title.clone()).unwrap_or_default();
@@ -1473,7 +1611,7 @@ impl App {
             }
         }
 
-        match draw_draft(ui.ctx(), &mut self.draft) {
+        match draw_draft(ui.ctx(), &mut self.draft, &self.gen_opts, &self.gen_phrase) {
             DraftOutcome::Idle => {}
             DraftOutcome::Cancel => self.draft = None,
             DraftOutcome::Save { item, is_new } => {
@@ -1497,6 +1635,9 @@ impl App {
         self.password_dialog(ui.ctx(), &mut vault);
         self.export_dialog(ui.ctx(), &mut vault);
         self.audit_dialog(ui.ctx(), &vault);
+        self.quick_add_dialog(ui.ctx(), &mut vault);
+        self.descriptions_dialog(ui.ctx(), &mut vault);
+        self.generator_dialog(ui.ctx());
 
         if lock_requested {
             self.lock("Заблокировано.");
@@ -1950,6 +2091,410 @@ impl App {
             self.audit_open = false;
         }
     }
+
+    /// Диалог генератора паролей: случайные символы или фраза из слов.
+    fn generator_dialog(&mut self, ctx: &egui::Context) {
+        if !self.gen_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut generate = false;
+        let opts_before = self.gen_opts;
+        let phrase_before = self.gen_phrase;
+
+        egui::Window::new("Генератор паролей")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.gen_mode, GenMode::Chars, "Случайные символы");
+                    ui.selectable_value(&mut self.gen_mode, GenMode::Phrase, "Запоминаемая фраза");
+                });
+                ui.separator();
+
+                let bits = match self.gen_mode {
+                    GenMode::Chars => {
+                        ui.horizontal(|ui| {
+                            ui.label("Длина");
+                            ui.add(
+                                egui::Slider::new(&mut self.gen_opts.length, 8..=64)
+                                    .text("символов"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.gen_opts.lowercase, "строчные");
+                            ui.checkbox(&mut self.gen_opts.uppercase, "заглавные");
+                            ui.checkbox(&mut self.gen_opts.digits, "цифры");
+                            ui.checkbox(&mut self.gen_opts.symbols, "символы");
+                        });
+                        ui.checkbox(
+                            &mut self.gen_opts.avoid_ambiguous,
+                            "без похожих символов (Il1O0)",
+                        );
+                        self.gen_opts.entropy_bits()
+                    }
+                    GenMode::Phrase => {
+                        ui.horizontal(|ui| {
+                            ui.label("Язык слов");
+                            egui::ComboBox::from_id_salt("gen_lang")
+                                .selected_text(self.gen_phrase.language.label())
+                                .show_ui(ui, |ui| {
+                                    for lang in Wordlist::all() {
+                                        ui.selectable_value(
+                                            &mut self.gen_phrase.language,
+                                            lang,
+                                            lang.label(),
+                                        );
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Слов во фразе");
+                            ui.add(
+                                egui::Slider::new(&mut self.gen_phrase.words, 3..=8)
+                                    .text("шт."),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Цифр в конце");
+                            ui.add(
+                                egui::Slider::new(&mut self.gen_phrase.digits, 0..=4)
+                                    .text("шт."),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Разделитель");
+                            egui::ComboBox::from_id_salt("gen_sep")
+                                .selected_text(self.gen_phrase.separator.label())
+                                .show_ui(ui, |ui| {
+                                    for sep in Separator::all() {
+                                        ui.selectable_value(
+                                            &mut self.gen_phrase.separator,
+                                            sep,
+                                            sep.label(),
+                                        );
+                                    }
+                                });
+                            ui.checkbox(&mut self.gen_phrase.capitalize, "с заглавной буквы");
+                        });
+                        passphrase_entropy_bits(&self.gen_phrase)
+                    }
+                };
+
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.gen_result)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "≈ {bits:.0} бит · {}",
+                        strength_word(bits)
+                    ))
+                    .small()
+                    .color(strength_color(bits)),
+                );
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Сгенерировать").clicked() {
+                        generate = true;
+                    }
+                    if ui
+                        .button("Копировать")
+                        .on_hover_text("Буфер очистится через 30 секунд")
+                        .clicked()
+                    {
+                        let result = self.gen_result.clone();
+                        self.copy(&result, "Пароль");
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Фразу из слов проще запомнить и набрать, чем случайные символы, а стойкость при достаточном числе слов та же.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+
+        if !open {
+            self.gen_open = false;
+            self.gen_result.zeroize();
+            return;
+        }
+        // Настройки поменяли — сразу показываем свежий образец.
+        if self.gen_opts != opts_before
+            || self.gen_phrase != phrase_before
+            || self.gen_mode == GenMode::Phrase
+                && self.gen_result.is_ascii()
+                    != matches!(self.gen_phrase.language, Wordlist::Russian)
+            || generate
+        {
+            self.regenerate();
+        }
+    }
+
+    /// Генерирует образец по текущим настройкам генератора.
+    fn regenerate(&mut self) {
+        let result = match self.gen_mode {
+            GenMode::Chars => generate_password(&self.gen_opts),
+            GenMode::Phrase => generate_passphrase(&self.gen_phrase),
+        };
+        match result {
+            Ok(password) => self.gen_result = password,
+            Err(err) => self.status = format!("Не удалось сгенерировать: {err}"),
+        }
+    }
+
+    /// Быстрая вставка: разбирает скопированный логин и пароль в новую запись.
+    fn quick_add_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        if !self.quick_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut paste = false;
+        let mut parse = false;
+        let mut create = false;
+        let mut cancel = false;
+
+        egui::Window::new("Быстрая вставка логина и пароля")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Вставьте скопированное: «логин пароль», login:password, «сайт логин пароль», адрес вида https://ivan:secret@site.ru или строки «Логин: …» и «Пароль: …».",
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.quick_text)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("например: mail.ru ivan@example.com Pa$$w0rd"),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Взять из буфера обмена").clicked() {
+                        paste = true;
+                    }
+                    if ui.button("Разобрать").clicked() {
+                        parse = true;
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                egui::Grid::new("quick_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Название");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_title)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+
+                        ui.label("Логин");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_username)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+
+                        ui.label("Пароль");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_password)
+                                .desired_width(f32::INFINITY)
+                                .password(true),
+                        );
+                        ui.end_row();
+
+                        ui.label("Сайт");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_url)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                let can_create =
+                    !self.quick_username.trim().is_empty() || !self.quick_password.is_empty();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_create, egui::Button::new("Создать запись"))
+                        .clicked()
+                    {
+                        create = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                    if !can_create {
+                        ui.label(
+                            egui::RichText::new("Вставьте данные и нажмите «Разобрать»")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                });
+            });
+
+        if paste {
+            if let Ok(mut cb) = arboard::Clipboard::new()
+                && let Ok(text) = cb.get_text()
+                && !text.trim().is_empty()
+            {
+                self.quick_text = text;
+                parse = true;
+            } else {
+                self.status = "В буфере обмена нет текста.".to_string();
+            }
+        }
+
+        if parse {
+            let parsed = parse_credentials(&self.quick_text);
+            self.quick_title = parsed.title;
+            self.quick_username = parsed.username;
+            self.quick_password = parsed.password;
+            self.quick_url = parsed.url;
+        }
+
+        if create {
+            let title = if self.quick_title.trim().is_empty() {
+                "Новая запись"
+            } else {
+                self.quick_title.trim()
+            };
+            let mut item = Item::new(ItemKind::Login, title);
+            item.username = self.quick_username.trim().to_string();
+            item.password = self.quick_password.clone();
+            item.url = self.quick_url.trim().to_string();
+            item.notes = auto_description(&item);
+            match vault.add(item.clone()) {
+                Ok(id) => {
+                    self.selected = Some(id);
+                    self.status = format!("Запись «{}» создана.", item.title);
+                    self.quick_open = false;
+                    self.quick_text.zeroize();
+                    self.quick_password.zeroize();
+                }
+                Err(err) => self.status = format!("Не удалось создать запись: {err}"),
+            }
+        }
+
+        if cancel {
+            open = false;
+        }
+        if !open {
+            self.quick_open = false;
+            self.quick_text.zeroize();
+            self.quick_password.zeroize();
+        }
+    }
+
+    /// Массовое добавление осмысленных описаний записям без заметок.
+    fn descriptions_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        if !self.desc_open {
+            return;
+        }
+
+        let missing: Vec<&Item> = vault
+            .items()
+            .iter()
+            .filter(|item| item.notes.trim().is_empty())
+            .collect();
+        let mut open = true;
+        let mut apply = false;
+
+        egui::Window::new("Осмысленные описания")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Программа собирает описание из названия, логина, сайта и открытых полей записи. Пароли и скрытые значения в описание не попадают.",
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Записей без описания: {} из {}.",
+                        missing.len(),
+                        vault.items().len()
+                    ))
+                    .strong(),
+                );
+
+                if missing.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label("У всех записей уже есть заметки.");
+                } else {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("desc_preview")
+                        .auto_shrink([false, false])
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for item in missing.iter().take(5) {
+                                ui.label(egui::RichText::new(&item.title).strong());
+                                ui.label(
+                                    egui::RichText::new(auto_description(item))
+                                        .small()
+                                        .weak(),
+                                );
+                                ui.add_space(4.0);
+                            }
+                            if missing.len() > 5 {
+                                ui.label(
+                                    egui::RichText::new(format!("…и ещё {}", missing.len() - 5))
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                        });
+                    ui.add_space(6.0);
+                    if ui
+                        .button(format!("Добавить описания ({})", missing.len()))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Описание попадает в заметки записи — видно в списке, можно поправить кнопкой «Изменить».",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+            });
+
+        if apply {
+            match vault.describe_missing_notes() {
+                Ok(count) => {
+                    self.status =
+                        format!("Добавлено описаний: {count}. Проверьте их кнопкой «Изменить».");
+                    self.desc_open = false;
+                }
+                Err(err) => self.status = format!("Не удалось добавить описания: {err}"),
+            }
+        }
+        if !open {
+            self.desc_open = false;
+        }
+    }
 }
 
 /// Путь экспорта по умолчанию — рядом с хранилищем.
@@ -1958,6 +2503,46 @@ fn default_export_path(vault_path: &Path, format: ExportFormat) -> String {
         .with_file_name(format!("hranitel-export.{}", format.extension()))
         .display()
         .to_string()
+}
+
+/// Слово-вердикт по энтропии пароля.
+fn strength_word(bits: f64) -> &'static str {
+    if bits < 40.0 {
+        "слабый"
+    } else if bits < 65.0 {
+        "средний"
+    } else if bits < 90.0 {
+        "сильный"
+    } else {
+        "очень сильный"
+    }
+}
+
+/// Цвет вердикта: от тревожного красного до спокойного зелёного.
+fn strength_color(bits: f64) -> egui::Color32 {
+    if bits < 40.0 {
+        egui::Color32::from_rgb(200, 70, 70)
+    } else if bits < 65.0 {
+        egui::Color32::from_rgb(190, 130, 40)
+    } else if bits < 90.0 {
+        egui::Color32::from_rgb(70, 140, 70)
+    } else {
+        egui::Color32::from_rgb(40, 110, 60)
+    }
+}
+
+/// Первая непустая строка заметки — как краткое описание в списке записей.
+fn notes_snippet(notes: &str) -> String {
+    let line = notes
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let mut snippet: String = line.chars().take(56).collect();
+    if snippet.chars().count() < line.chars().count() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 /// Рисует группу находок аудита; клик выбирает запись и закрывает панель.
@@ -2061,7 +2646,16 @@ impl eframe::App for App {
             && !self.help_open
             && !self.hotkey_capture
         {
-            if self.password_open {
+            if self.quick_open {
+                self.quick_open = false;
+                self.quick_text.zeroize();
+                self.quick_password.zeroize();
+            } else if self.gen_open {
+                self.gen_open = false;
+                self.gen_result.zeroize();
+            } else if self.desc_open {
+                self.desc_open = false;
+            } else if self.password_open {
                 self.password_open = false;
             } else if self.export_open {
                 self.export_open = false;
@@ -2130,7 +2724,12 @@ impl eframe::App for App {
     }
 }
 
-fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
+fn draw_draft(
+    ctx: &egui::Context,
+    draft: &mut Option<Draft>,
+    gen_opts: &GeneratorOptions,
+    gen_phrase: &PassphraseOptions,
+) -> DraftOutcome {
     let Some(d) = draft.as_mut() else {
         return DraftOutcome::Idle;
     };
@@ -2186,16 +2785,69 @@ fn draw_draft(ctx: &egui::Context, draft: &mut Option<Draft>) -> DraftOutcome {
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut d.password)
-                                    .desired_width(250.0)
+                                    .desired_width(210.0)
                                     .password(!d.show_plain),
                             );
-                            if ui.small_button("Показать").clicked() {
+                            if ui
+                                .small_button(if d.show_plain { "Скрыть" } else { "Показать" })
+                                .clicked()
+                            {
                                 d.show_plain = !d.show_plain;
                             }
-                            if ui.small_button("Сгенерировать").clicked() {
-                                d.password = generate_password(&GeneratorOptions::default())
-                                    .unwrap_or_default();
+                            if ui
+                                .small_button("Случайный")
+                                .on_hover_text("По настройкам из окна «Генератор»")
+                                .clicked()
+                            {
+                                d.password = generate_password(gen_opts).unwrap_or_default();
                                 d.show_plain = true;
+                            }
+                            if ui
+                                .small_button("Фраза")
+                                .on_hover_text(
+                                    "Запоминаемая фраза, например «Корабль-Мандарин-Вишня-Сосна-42»",
+                                )
+                                .clicked()
+                            {
+                                d.password = generate_passphrase(gen_phrase).unwrap_or_default();
+                                d.show_plain = true;
+                            }
+                            if ui
+                                .small_button("Вставить")
+                                .on_hover_text("Взять пароль из буфера обмена")
+                                .clicked()
+                                && let Ok(mut cb) = arboard::Clipboard::new()
+                                && let Ok(text) = cb.get_text()
+                            {
+                                let text = text.trim().to_string();
+                                if !text.is_empty() {
+                                    d.password = text;
+                                    d.show_plain = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.horizontal(|ui| {
+                            let bits = password_entropy_bits(&d.password);
+                            if bits > 0.0 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "≈ {bits:.0} бит · {}",
+                                        strength_word(bits)
+                                    ))
+                                    .small()
+                                    .color(strength_color(bits)),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "придумайте пароль или нажмите «Случайный»/«Фраза»",
+                                    )
+                                    .weak()
+                                    .small(),
+                                );
                             }
                         });
                         ui.end_row();

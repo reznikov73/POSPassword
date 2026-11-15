@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 use crate::audit::{AuditReport, audit};
 use crate::crypto::{self, KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
+use crate::describe;
 use crate::export::{ExportFormat, export_csv, export_json};
 use crate::hello::{self, HelloEnvelope};
 use crate::model::{Item, VaultData, now_secs};
@@ -251,6 +252,25 @@ impl Vault {
             return Err(Error::ItemNotFound(id.to_string()));
         }
         self.save()
+    }
+
+    /// Заполняет пустые заметки осмысленными описаниями и сохраняет файл
+    /// один раз. Возвращает число описанных записей. Существующие заметки
+    /// пользователя не трогаются.
+    pub fn describe_missing_notes(&mut self) -> Result<usize> {
+        let mut count = 0;
+        for item in &mut self.data.items {
+            if item.notes.trim().is_empty() {
+                let description = describe::auto_description(item);
+                item.notes = description;
+                item.touch();
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.save()?;
+        }
+        Ok(count)
     }
 
     /// Меняет мастер-пароль: новая соль, новый ключ, та же полезная нагрузка.

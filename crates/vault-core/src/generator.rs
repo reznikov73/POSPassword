@@ -10,7 +10,7 @@ const AMBIGUOUS: &str = "Il1O0o";
 
 /// Настройки генератора. По умолчанию — 20 символов, все классы,
 /// без визуально неоднозначных символов.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GeneratorOptions {
     pub length: usize,
     pub lowercase: bool,
@@ -49,6 +49,27 @@ impl GeneratorOptions {
             out.push(SYMBOLS);
         }
         out
+    }
+
+    /// Алфавит генератора с учётом фильтра визуально неоднозначных символов.
+    pub fn pool_size(&self) -> usize {
+        let mut charset = String::new();
+        for class in &self.classes() {
+            charset.push_str(class);
+        }
+        charset
+            .chars()
+            .filter(|c| !self.avoid_ambiguous || !AMBIGUOUS.contains(*c))
+            .count()
+    }
+
+    /// Энтропия пароля, который выдаст генератор с такими настройками, в битах.
+    pub fn entropy_bits(&self) -> f64 {
+        let pool = self.pool_size();
+        if pool == 0 {
+            return 0.0;
+        }
+        self.length as f64 * (pool as f64).log2()
     }
 }
 
@@ -107,4 +128,61 @@ pub fn generate_password(opts: &GeneratorOptions) -> Result<String> {
     }
 
     Ok(chars.into_iter().collect())
+}
+
+/// Оценка энтропии произвольного пароля в битах — по длине и классам символов.
+/// Для сгенерированных случайных паролей и фраз оценка честная; пароль,
+/// набранный человеком (слова, даты), реальной стойкости не имеет, но по
+/// классам она и не прикидывается словарной атакой — это ориентир, не гарантия.
+pub fn password_entropy_bits(password: &str) -> f64 {
+    let len = password.chars().count();
+    if len == 0 {
+        return 0.0;
+    }
+
+    let mut ascii_lower = false;
+    let mut ascii_upper = false;
+    let mut digit = false;
+    let mut symbol = false;
+    let mut cyrillic = false;
+    let mut other = false;
+    for ch in password.chars() {
+        if ch.is_ascii_lowercase() {
+            ascii_lower = true;
+        } else if ch.is_ascii_uppercase() {
+            ascii_upper = true;
+        } else if ch.is_ascii_digit() {
+            digit = true;
+        } else if matches!(ch, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё') {
+            cyrillic = true;
+        } else if !ch.is_ascii_alphanumeric() && ch.is_ascii() {
+            symbol = true;
+        } else {
+            other = true;
+        }
+    }
+
+    let mut pool = 0;
+    if ascii_lower {
+        pool += 26;
+    }
+    if ascii_upper {
+        pool += 26;
+    }
+    if digit {
+        pool += 10;
+    }
+    if symbol {
+        pool += 32;
+    }
+    if cyrillic {
+        pool += 66;
+    }
+    if other {
+        pool += 100;
+    }
+    if pool == 0 {
+        return 0.0;
+    }
+    len as f64 * (pool as f64).log2()
 }

@@ -13,22 +13,30 @@
 
 mod audit;
 mod crypto;
+mod describe;
 mod error;
 mod export;
 mod generator;
 mod hello;
 mod import;
 mod model;
+mod passphrase;
+mod quickadd;
 mod totp;
 mod vault;
 
 pub use audit::{AuditReport, Expiry, Finding, audit, expiries, is_expiry_label, parse_date};
 pub use crypto::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
+pub use describe::auto_description;
 pub use error::{Error, Result};
 pub use export::{ExportFormat, export_csv, export_json};
-pub use generator::{GeneratorOptions, generate_password};
+pub use generator::{GeneratorOptions, generate_password, password_entropy_bits};
 pub use hello::{generate_wrapping_key, protected_wrapping_key, sidecar_path};
 pub use import::{ImportFormat, ImportSummary, import_file};
 pub use model::{Field, Item, ItemKind, VaultData};
+pub use passphrase::{
+    PassphraseOptions, Separator, Wordlist, generate_passphrase, passphrase_entropy_bits,
+};
+pub use quickadd::{ParsedCredentials, parse_credentials};
 pub use totp::{Totp, now_secs};
 pub use vault::{FORMAT_VERSION, MAGIC, Vault};

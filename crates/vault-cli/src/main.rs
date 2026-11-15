@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vault_core::{
-    Error, GeneratorOptions, ImportFormat, Item, ItemKind, Result, Vault, generate_password,
-    import_file,
+    Error, GeneratorOptions, ImportFormat, Item, ItemKind, PassphraseOptions, Result, Vault,
+    Wordlist, generate_passphrase, generate_password, import_file, passphrase_entropy_bits,
 };
 
 const HELP: &str = "\
@@ -23,6 +23,8 @@ const HELP: &str = "\
   vault-cli import <файл> <экспорт>     импорт из Bitwarden или 1Password
         [--format auto|bitwarden-json|bitwarden-csv|1password-csv|csv]
   vault-cli gen [--length N]            сгенерировать пароль
+  vault-cli gen --phrase [--words N] [--digits N] [--lang ru|en]
+                                        запоминаемая фраза из слов
   vault-cli help
 
 Мастер-пароль запрашивается интерактивно. Для скриптов можно задать
@@ -245,13 +247,54 @@ fn parse_import_format(args: &[String]) -> Result<ImportFormat> {
 }
 
 fn generate_cmd(args: &[String]) -> Result<()> {
-    let length = parse_length(args)?.unwrap_or(20);
+    if args.iter().any(|a| a == "--phrase") {
+        let words = parse_usize(args, "--words")?.unwrap_or(5);
+        let digits = parse_usize(args, "--digits")?.unwrap_or(2);
+        let lang = parse_lang(args)?;
+        let opts = PassphraseOptions {
+            words,
+            digits,
+            language: lang,
+            ..PassphraseOptions::default()
+        };
+        let phrase = generate_passphrase(&opts)?;
+        eprintln!(
+            "≈ {:.0} бит; слова: {} из {}",
+            passphrase_entropy_bits(&opts),
+            opts.words,
+            opts.language.words().len()
+        );
+        println!("{phrase}");
+        return Ok(());
+    }
+
+    let length = parse_usize(args, "--length")?.unwrap_or(20);
     let password = generate_password(&GeneratorOptions {
         length,
         ..GeneratorOptions::default()
     })?;
     println!("{password}");
     Ok(())
+}
+
+/// `--lang en` и `--lang=en`; по умолчанию — русский.
+fn parse_lang(args: &[String]) -> Result<Wordlist> {
+    let value: Option<&str> = if let Some(pos) = args.iter().position(|a| a == "--lang") {
+        let value = args
+            .get(pos + 1)
+            .ok_or_else(|| Error::InvalidFormat("--lang требует значения: ru или en".into()))?;
+        Some(value.as_str())
+    } else {
+        args.iter().find_map(|a| a.strip_prefix("--lang="))
+    };
+    match value {
+        None => Ok(Wordlist::Russian),
+        Some("ru") => Ok(Wordlist::Russian),
+        Some("en") => Ok(Wordlist::English),
+        Some(other) => Err(Error::InvalidFormat(format!(
+            "неизвестный язык: {other} (нужен ru или en)"
+        ))),
+    }
 }
 
 fn open_vault(path: impl AsRef<std::path::Path>) -> Result<Vault> {
@@ -266,18 +309,19 @@ fn require_path(args: &[String]) -> Result<PathBuf> {
 }
 
 fn parse_length(args: &[String]) -> Result<Option<usize>> {
-    let Some(pos) = args.iter().position(|a| a == "--length") else {
+    parse_usize(args, "--length")
+}
+
+fn parse_usize(args: &[String], flag: &str) -> Result<Option<usize>> {
+    let Some(pos) = args.iter().position(|a| a == flag) else {
         return Ok(None);
     };
     let value = args
         .get(pos + 1)
-        .ok_or_else(|| Error::InvalidFormat("--length требует значения".into()))?;
+        .ok_or_else(|| Error::InvalidFormat(format!("{flag} требует значения")))?;
     let parsed: usize = value
         .parse()
-        .map_err(|_| Error::InvalidFormat(format!("некорректная длина: {value}")))?;
-    if !(8..=128).contains(&parsed) {
-        return Err(Error::InvalidFormat("длина должна быть от 8 до 128".into()));
-    }
+        .map_err(|_| Error::InvalidFormat(format!("некорректное число: {value}")))?;
     Ok(Some(parsed))
 }
 
