@@ -129,10 +129,38 @@ fn serve_client(pipe: HANDLE, jobs: &Sender<BrowserJob>, ctx: &eframe::egui::Con
             }
         };
 
+        // Пинг и генератор хранилища не требуют и кадров интерфейса не ждут:
+        // отвечаем прямо здесь, иначе спрятанное в трей окно «молчит».
+        match &request {
+            BrowserRequest::Ping => {
+                if write_frame(pipe, &pong_json()).is_err() {
+                    return;
+                }
+                continue;
+            }
+            BrowserRequest::GeneratePassword => {
+                let reply = match vault_core::generate_passphrase(
+                    &vault_core::PassphraseOptions::default(),
+                ) {
+                    Ok(value) => password_json(&value),
+                    Err(err) => error_json(&format!("генератор: {err}")),
+                };
+                if write_frame(pipe, &reply).is_err() {
+                    return;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
         // Запросы доступа и сохранения ждут человека: если окно свёрнуто,
         // ответа не будет — значит, окно надо поднять, иначе пользователь
         // вообще не узнает о вопросе.
         let attention = needs_attention(&request);
+        if attention {
+            // Спрятанное окно не получает кадров — показываем заранее.
+            crate::autotype::restore_main_window();
+        }
         let (reply, answer) = channel();
         if jobs.send(BrowserJob { request, reply }).is_err() {
             let _ = write_frame(pipe, &error_json("«Хранитель» закрывается."));

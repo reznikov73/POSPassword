@@ -62,14 +62,19 @@ mod win {
     }
 
     /// Один обмен с приложением: подключиться, отправить запрос, забрать ответ.
+    /// Если канала нет, пробуем поднять «Хранитель» — клик по замку в браузере
+    /// должен сам открыть программу с запросом на разблокировку.
     fn exchange_with_app(request: &[u8]) -> Vec<u8> {
         let mut pipe = match PipeClient::connect() {
             Ok(pipe) => pipe,
-            Err(err) => {
-                return error_reply(&format!(
-                "«Хранитель» не отвечает ({err}). Запустите программу и разблокируйте хранилище."
-            ))
-            }
+            Err(first) => match start_app_and_connect() {
+                Ok(pipe) => pipe,
+                Err(err) => {
+                    return error_reply(&format!(
+                        "«Хранитель» не отвечает ({first}; {err}). Запустите программу и разблокируйте хранилище."
+                    ));
+                }
+            },
         };
         if let Err(err) = codec::write_frame(&mut pipe, request) {
             return error_reply(&format!("не удалось отправить запрос: {err}"));
@@ -84,6 +89,41 @@ mod win {
     fn error_reply(message: &str) -> Vec<u8> {
         let json = serde_json::json!({ "action": "error", "message": message });
         serde_json::to_vec(&json).unwrap_or_default()
+    }
+
+    /// Запускает `vault-win.exe` рядом с хостом (свёрнутым в трей) и ждёт
+    /// канал до трёх секунд. `--quiet` — чтобы второй экземпляр не показывал
+    /// окно «уже запущен».
+    fn start_app_and_connect() -> Result<PipeClient, String> {
+        let host = std::env::current_exe().map_err(|err| err.to_string())?;
+        let dir = host
+            .parent()
+            .ok_or_else(|| "не удалось определить папку хоста".to_string())?;
+        let app = dir.join("vault-win.exe");
+        if !app.exists() {
+            return Err("vault-win.exe рядом с browser-host.exe не найден".to_string());
+        }
+        std::process::Command::new(&app)
+            .arg("--tray")
+            .arg("--quiet")
+            // Не наследовать stdin/stdout хоста: иначе браузер будет ждать
+            // закрытия порта, пока живёт запущенное приложение.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|err| format!("не удалось запустить «Хранитель»: {err}"))?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            if let Ok(pipe) = PipeClient::connect() {
+                return Ok(pipe);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("«Хранитель» не успел открыть канал".to_string());
+            }
+        }
     }
 
     /// Клиент именованного канала с интерфейсом `Read`/`Write` — чтобы

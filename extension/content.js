@@ -160,6 +160,11 @@
     }
 
     const anchor = field.getBoundingClientRect();
+    // Два меню одновременно — это баг: если предыдущее осталось, убираем.
+    if (ui.list) {
+      ui.list.remove();
+      ui.list = null;
+    }
     ui.list = document.createElement("div");
     Object.assign(ui.list.style, {
       position: "fixed",

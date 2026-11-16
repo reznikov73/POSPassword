@@ -637,6 +637,16 @@ fn quick_pressed(ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
+/// Заголовок и дескриптор чужого окна на переднем плане. `None` — активно
+/// наше окно или окна нет; нужно для быстрого доступа из трея.
+pub fn foreground_target() -> Option<(isize, String)> {
+    let window = unsafe { GetForegroundWindow() };
+    if window.0.is_null() || window_pid(window) == std::process::id() {
+        return None;
+    }
+    Some((window.0 as isize, window_title(window)))
+}
+
 /// Заголовок окна.
 fn window_title(window: HWND) -> String {
     let mut buffer = [0u16; 512];
@@ -688,6 +698,23 @@ pub(crate) fn restore_main_window() {
             LPARAM(&mut collector as *mut Collector as isize),
         );
         if let Some(window) = collector.found {
+            // Окно могло быть «спрятано в трей» переносом за экран
+            // и стилем инструментального окна — возвращаем на место.
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GWL_EXSTYLE, GetWindowLongPtrW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+                SetWindowLongPtrW, SetWindowPos, WS_EX_TOOLWINDOW,
+            };
+            let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+            SetWindowLongPtrW(window, GWL_EXSTYLE, style & !(WS_EX_TOOLWINDOW.0 as isize));
+            let _ = SetWindowPos(
+                window,
+                None,
+                100,
+                100,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            );
             // SW_RESTORE и разворачивает свёрнутое окно, и активирует обычное.
             let _ = ShowWindow(window, SW_RESTORE);
             let _ = SetForegroundWindow(window);

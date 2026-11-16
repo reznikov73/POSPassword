@@ -12,6 +12,7 @@ mod browser;
 mod filedialog;
 mod hello_win;
 mod help;
+mod tray;
 mod uia;
 
 use std::collections::HashSet;
@@ -36,19 +37,29 @@ const AUTO_LOCK: Duration = Duration::from_secs(5 * 60);
 const CLIPBOARD_TTL: Duration = Duration::from_secs(30);
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    // --tray: старт свёрнутым (автозапуск), --quiet: не показывать окно
+    // "уже запущен" (так программу поднимает мост из браузера).
+    let start_hidden = args.iter().any(|arg| arg == "--tray");
+    let quiet = args.iter().any(|arg| arg == "--quiet");
+
     // Один экземпляр: два окна путают автоввод — горячую клавишу держит только одно.
     if other_instance_running() {
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-            use windows::core::w;
-            MessageBoxW(
-                None,
-                w!(
-                    "«Хранитель» уже запущен в другом окне.\n\nЗакройте старое окно и запустите это снова — иначе автоввод будет работать из старого экземпляра."
-                ),
-                w!("Хранитель"),
-                MB_OK | MB_ICONINFORMATION,
-            );
+        if !quiet {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    MB_ICONINFORMATION, MB_OK, MessageBoxW,
+                };
+                use windows::core::w;
+                MessageBoxW(
+                    None,
+                    w!(
+                        "«Хранитель» уже запущен в другом окне.\n\nЗакройте старое окно и запустите это снова — иначе автоввод будет работать из старого экземпляра."
+                    ),
+                    w!("Хранитель"),
+                    MB_OK | MB_ICONINFORMATION,
+                );
+            }
         }
         std::process::exit(0);
     }
@@ -57,6 +68,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1020.0, 680.0])
             .with_min_inner_size([760.0, 520.0])
+            .with_visible(!start_hidden)
             .with_title(format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
@@ -241,7 +253,7 @@ fn settings_path() -> PathBuf {
     app_dir().join("settings.txt")
 }
 
-/// Настройки программы: тема, сочетания клавиш и последний путь к хранилищу.
+/// Настройки программы: тема, сочетания клавиш, путь к хранилищу и режим окна.
 #[derive(Clone)]
 struct Settings {
     theme: Theme,
@@ -250,6 +262,10 @@ struct Settings {
     vault_path: Option<String>,
     /// Разрешено ли расширению браузера обращаться к хранилищу.
     browser: bool,
+    /// Закрытие окна сворачивает в трей, а не выходит из программы.
+    tray: bool,
+    /// Запуск при входе в Windows (свёрнутым в трей).
+    autostart: bool,
 }
 
 fn load_settings() -> Settings {
@@ -259,6 +275,8 @@ fn load_settings() -> Settings {
         quick_hotkey: autotype::quick_default(),
         vault_path: None,
         browser: true,
+        tray: true,
+        autostart: false,
     };
     let Ok(text) = std::fs::read_to_string(settings_path()) else {
         return settings;
@@ -296,6 +314,12 @@ fn load_settings() -> Settings {
             "browser" => {
                 settings.browser = value.trim() != "off";
             }
+            "tray" => {
+                settings.tray = value.trim() != "off";
+            }
+            "autostart" => {
+                settings.autostart = value.trim() == "on";
+            }
             "path" => {
                 let path = value.trim();
                 if !path.is_empty() {
@@ -308,31 +332,29 @@ fn load_settings() -> Settings {
     settings
 }
 
-fn save_settings(
-    theme: Theme,
-    hotkey: autotype::Hotkey,
-    quick: autotype::Hotkey,
-    vault_path: &str,
-    browser: bool,
-) {
+fn save_settings(settings: &Settings) {
     let dir = app_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let theme_value = match theme {
+    let theme_value = match settings.theme {
         Theme::Light => "light",
         Theme::Dark => "dark",
     };
-    let browser_value = if browser { "on" } else { "off" };
+    let browser_value = if settings.browser { "on" } else { "off" };
+    let tray_value = if settings.tray { "on" } else { "off" };
+    let autostart_value = if settings.autostart { "on" } else { "off" };
     let mut text = format!(
-        "theme={theme_value}\nhotkey={}\nquickkey={}\nbrowser={browser_value}\n",
-        hotkey.label().to_lowercase(),
-        quick.label().to_lowercase()
+        "theme={theme_value}\nhotkey={}\nquickkey={}\nbrowser={browser_value}\ntray={tray_value}\nautostart={autostart_value}\n",
+        settings.hotkey.label().to_lowercase(),
+        settings.quick_hotkey.label().to_lowercase()
     );
     // Последний открытый файл: при следующем запуске поле уже заполнено.
-    let path = vault_path.trim();
-    if !path.is_empty() {
-        text.push_str(&format!("path={path}\n"));
+    if let Some(path) = settings.vault_path.as_deref() {
+        let path = path.trim();
+        if !path.is_empty() {
+            text.push_str(&format!("path={path}\n"));
+        }
     }
     let _ = std::fs::write(dir.join("settings.txt"), text);
 }
@@ -549,6 +571,28 @@ enum BrowserOutcome {
 struct App {
     mode: Mode,
     path: String,
+    /// Запуск с ключом --tray: окно спрятать после первого кадра.
+    start_hidden: bool,
+    /// Момент повторного скрытия: окно успевает появиться после первого кадра.
+    hide_after: Option<Instant>,
+    /// Дескриптор главного окна: прячем и показываем его напрямую через Win32.
+    main_hwnd: isize,
+    /// Сворачивать в трей при закрытии окна.
+    hide_to_tray: bool,
+    /// Запускать при входе в Windows.
+    autostart: bool,
+    /// Команды значка в трее.
+    tray_commands: Option<std::sync::mpsc::Receiver<tray::TrayCommand>>,
+    /// Разрешено закрыть программу по-настоящему (пункт «Выход»).
+    allow_exit: bool,
+    /// Последнее чужое окно на переднем плане — цель «Быстрого доступа» из трея.
+    last_target: Option<(isize, String)>,
+    /// Запрос браузера, ждущий разблокировки хранилища.
+    pending_browser: Option<(browser::BrowserRequest, Sender<String>)>,
+    /// Запрос быстрого доступа, ждущий разблокировки.
+    pending_quick: Option<autotype::QuickRequest>,
+    /// Поставить курсор в поле мастер-пароля (браузер или трей просят доступ).
+    focus_password: bool,
     password: String,
     confirm: String,
     vault: Option<Vault>,
@@ -650,6 +694,10 @@ impl App {
         let theme = settings.theme;
         let hotkey = settings.hotkey;
         let quick_hotkey = settings.quick_hotkey;
+        let hide_to_tray = settings.tray;
+        let autostart = settings.autostart;
+        let start_hidden = std::env::args().any(|arg| arg == "--tray");
+        let main_hwnd = main_window_hwnd(cc);
         let startup_path = settings
             .vault_path
             .clone()
@@ -681,6 +729,17 @@ impl App {
         Self {
             mode: Mode::Open,
             path: startup_path,
+            hide_to_tray,
+            start_hidden,
+            hide_after: None,
+            main_hwnd,
+            autostart,
+            tray_commands: tray::start(main_window_hwnd(cc)),
+            allow_exit: false,
+            last_target: None,
+            pending_browser: None,
+            pending_quick: None,
+            focus_password: false,
             password: String::new(),
             confirm: String::new(),
             vault: None,
@@ -748,7 +807,119 @@ impl App {
         }
     }
 
+    /// Текущие настройки для записи в settings.txt.
+    fn settings_snapshot(&self) -> Settings {
+        Settings {
+            theme: self.theme,
+            hotkey: self.hotkey,
+            quick_hotkey: self.quick_hotkey,
+            vault_path: Some(self.path.clone()),
+            browser: self.browser_enabled,
+            tray: self.hide_to_tray,
+            autostart: self.autostart,
+        }
+    }
+
+    /// Показывает окно из трея и после запросов браузера.
+    fn show_main(&self, ctx: &egui::Context) {
+        show_window_now(self.main_hwnd);
+        ctx.request_repaint();
+    }
+
+    /// Закрытие окна: спрятать в трей или выйти по-настоящему.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().close_requested()) || self.allow_exit {
+            return;
+        }
+        if self.hide_to_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            hide_window(self.main_hwnd);
+            self.status =
+                "«Хранитель» свёрнут в трей — значки горячих клавиш работают.".to_string();
+            ctx.request_repaint();
+        } else {
+            self.allow_exit = true;
+        }
+    }
+
+    /// Команды из меню значка в трее.
+    fn handle_tray_commands(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.tray_commands.take() else {
+            return;
+        };
+        let mut commands = Vec::new();
+        while let Ok(command) = receiver.try_recv() {
+            commands.push(command);
+        }
+        self.tray_commands = Some(receiver);
+
+        for command in commands {
+            match command {
+                tray::TrayCommand::Open => self.show_main(ctx),
+                tray::TrayCommand::QuickAccess => {
+                    self.show_main(ctx);
+                    if self.vault.is_some() {
+                        let (hwnd, title) = self.last_target.clone().unwrap_or((0, String::new()));
+                        self.quick_access = Some(QuickAccess {
+                            query: String::new(),
+                            cursor: 0,
+                            target_title: (!title.is_empty()).then_some(title),
+                            target_hwnd: hwnd,
+                            focus: true,
+                        });
+                        self.status =
+                            "Быстрый доступ: начните печатать, Enter — ввести в окно.".to_string();
+                    } else {
+                        self.pending_quick = Some(autotype::QuickRequest {
+                            title: self.last_target.as_ref().map(|(_, title)| title.clone()),
+                            hwnd: self
+                                .last_target
+                                .as_ref()
+                                .map(|(hwnd, _)| *hwnd)
+                                .unwrap_or(0),
+                        });
+                        self.focus_password = true;
+                        self.status =
+                            "Быстрый доступ: сначала разблокируйте хранилище.".to_string();
+                    }
+                }
+                tray::TrayCommand::Lock => {
+                    if self.vault.is_some() {
+                        self.lock("Заблокировано из трея.");
+                    }
+                    self.show_main(ctx);
+                }
+                tray::TrayCommand::Settings => {
+                    self.show_main(ctx);
+                    self.settings_open = true;
+                    self.hotkey_draft = self.hotkey.label();
+                    self.hotkey_error = None;
+                    self.hotkey_capture = false;
+                    self.hotkey_focus = true;
+                }
+                tray::TrayCommand::Exit => {
+                    self.allow_exit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// Запоминает последнее чужое окно на переднем плане.
+    fn remember_target_window(&mut self) {
+        if let Some(target) = autotype::foreground_target() {
+            self.last_target = Some(target);
+        }
+    }
+
     fn lock(&mut self, reason: &str) {
+        // Висящий запрос браузера/палитры без хранилища исполнить нельзя.
+        if let Some((_, reply)) = self.pending_browser.take() {
+            let _ = reply.send(browser::error_json(
+                "хранилище заблокировано — откройте его и повторите",
+            ));
+        }
+        self.pending_quick = None;
         self.vault = None;
         self.draft = None;
         self.confirm_delete = None;
@@ -822,8 +993,14 @@ impl App {
                 self.status =
                     "Быстрый доступ: начните печатать, Enter — ввести в окно.".to_string();
             } else {
+                // Заблокировано: запомним запрос и попросим войти — палитра
+                // откроется сама после разблокировки.
+                self.pending_quick = Some(request);
+                self.focus_password = true;
+                self.show_main(ctx);
                 self.status =
-                    "Хранилище заблокировано — сначала введите мастер-пароль.".to_string();
+                    "Быстрый доступ: сначала введите мастер-пароль — палитра откроется сама."
+                        .to_string();
             }
         }
 
@@ -875,13 +1052,7 @@ impl App {
                 };
                 // Запоминаем файл: при следующем запуске поле уже заполнено.
                 self.path = vault.path().display().to_string();
-                save_settings(
-                    self.theme,
-                    self.hotkey,
-                    self.quick_hotkey,
-                    &self.path,
-                    self.browser_enabled,
-                );
+                save_settings(&self.settings_snapshot());
                 self.vault = Some(vault);
                 self.selected = first;
                 self.hello_pending = None;
@@ -890,6 +1061,22 @@ impl App {
                 self.mode = Mode::Open;
                 self.last_activity = Instant::now();
                 self.error = None;
+                // Пока хранилище было закрыто, браузер или палитра могли
+                // попросить запись — теперь можно ответить.
+                if let Some((request, reply)) = self.pending_browser.take() {
+                    self.handle_browser(request, reply);
+                }
+                if let Some(quick) = self.pending_quick.take() {
+                    self.quick_access = Some(QuickAccess {
+                        query: String::new(),
+                        cursor: 0,
+                        target_title: quick.title,
+                        target_hwnd: quick.hwnd,
+                        focus: true,
+                    });
+                    self.status =
+                        "Быстрый доступ: начните печатать, Enter — ввести в окно.".to_string();
+                }
             }
             Err(err) => self.error = Some(err.to_string()),
         }
@@ -1018,6 +1205,19 @@ impl App {
                 self.error = None;
                 self.last_activity = Instant::now();
                 self.status = "Хранилище открыто через Windows Hello.".to_string();
+                // Отложенные запросы браузера и палитры теперь можно выполнить.
+                if let Some((request, reply)) = self.pending_browser.take() {
+                    self.handle_browser(request, reply);
+                }
+                if let Some(quick) = self.pending_quick.take() {
+                    self.quick_access = Some(QuickAccess {
+                        query: String::new(),
+                        cursor: 0,
+                        target_title: quick.title,
+                        target_hwnd: quick.hwnd,
+                        focus: true,
+                    });
+                }
             }
             Ok(Err(err)) => {
                 self.hello_pending = None;
@@ -1059,6 +1259,11 @@ impl App {
                         .password(true)
                         .desired_width(f32::INFINITY),
                 );
+                // Браузер или трей попросили доступ — сразу ставим курсор сюда.
+                if self.focus_password {
+                    password_edit.request_focus();
+                    self.focus_password = false;
+                }
 
                 if self.mode == Mode::Create {
                     ui.add_space(8.0);
@@ -1139,7 +1344,7 @@ impl App {
             {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path, self.browser_enabled);
+                save_settings(&self.settings_snapshot());
             }
             if ui.small_button("Справка (F1)").clicked() {
                 self.help_open = true;
@@ -1289,7 +1494,7 @@ impl App {
             if ui.button(format!("Тема: {}", self.theme.label())).clicked() {
                 self.theme = self.theme.toggled();
                 self.theme.apply(ui.ctx());
-                save_settings(self.theme, self.hotkey, self.quick_hotkey, &self.path, self.browser_enabled);
+                save_settings(&self.settings_snapshot());
             }
             if ui.button("Справка").clicked() {
                 self.help_open = true;
@@ -1976,13 +2181,7 @@ impl App {
                     );
                 if enabled != self.browser_enabled {
                     self.browser_enabled = enabled;
-                    save_settings(
-                        self.theme,
-                        self.hotkey,
-                        self.quick_hotkey,
-                        &self.path,
-                        self.browser_enabled,
-                    );
+                    save_settings(&self.settings_snapshot());
                     self.status = if enabled {
                         "Мост к браузеру включён.".to_string()
                     } else {
@@ -1992,6 +2191,52 @@ impl App {
                 ui.label(
                     egui::RichText::new(
                         "Расширение спрашивает у «Хранителя» записи для каждого сайта: первый раз — с вашим разрешением. Пароли не хранятся в браузере.",
+                    )
+                    .weak()
+                    .small(),
+                );
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                if ui
+                    .checkbox(
+                        &mut self.hide_to_tray,
+                        "Сворачивать в трей при закрытии окна",
+                    )
+                    .on_hover_text("Крестик прячет окно, а не закрывает программу: горячие клавиши и мост продолжают работать")
+                    .changed()
+                {
+                    save_settings(&self.settings_snapshot());
+                }
+                let mut autostart = self.autostart;
+                if ui
+                    .checkbox(
+                        &mut autostart,
+                        "Запускать при входе в Windows (свёрнутым в трей)",
+                    )
+                    .changed()
+                {
+                    match set_autostart(autostart) {
+                        Ok(()) => {
+                            self.autostart = autostart;
+                            save_settings(&self.settings_snapshot());
+                            self.status = if autostart {
+                                "Автозапуск включён: при входе в Windows «Хранитель» запустится в трее."
+                                    .to_string()
+                            } else {
+                                "Автозапуск выключен.".to_string()
+                            };
+                        }
+                        Err(err) => {
+                            self.hotkey_error = Some(format!("Автозапуск: {err}"));
+                        }
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Без запущенного «Хранителя» не работают ни горячие клавиши, ни автозаполнение в браузере. Хранилище остаётся заблокированным, пока вы не введёте пароль или не подтвердите Windows Hello.",
                     )
                     .weak()
                     .small(),
@@ -2098,13 +2343,7 @@ impl App {
                 self.hotkey_draft = hotkey.label();
                 self.hotkey_error = None;
                 self.settings_open = false;
-                save_settings(
-                    self.theme,
-                    self.hotkey,
-                    self.quick_hotkey,
-                    &self.path,
-                    self.browser_enabled,
-                );
+                save_settings(&self.settings_snapshot());
                 self.status = format!("Горячая клавиша автоввода: {}", hotkey.label());
             }
             Err(err) => self.hotkey_error = Some(err),
@@ -2118,13 +2357,7 @@ impl App {
                 self.quick_hotkey = hotkey;
                 self.quick_draft = hotkey.label();
                 self.quick_error = None;
-                save_settings(
-                    self.theme,
-                    self.hotkey,
-                    self.quick_hotkey,
-                    &self.path,
-                    self.browser_enabled,
-                );
+                save_settings(&self.settings_snapshot());
                 self.status = format!("Клавиша быстрого доступа: {}", hotkey.label());
             }
             Err(err) => self.quick_error = Some(err),
@@ -2767,9 +3000,14 @@ impl App {
     /// Разбирает запросы расширения. Один запрос — один ответ; если нужно
     /// решение человека, диалог забирает канал ответа себе.
     fn poll_browser_jobs(&mut self, ctx: &egui::Context) {
-        let _ = ctx;
         while let Ok(job) = self.browser_jobs.try_recv() {
             self.handle_browser(job.request, job.reply);
+            // Хранилище закрыто — поднимаем окно и ждём разблокировки,
+            // запрос остаётся висеть в мосте (у него две минуты).
+            if self.pending_browser.is_some() {
+                self.show_main(ctx);
+                break;
+            }
             // Диалог открыт — за раз решаем один запрос, остальные подождут.
             if self.browser_ask.is_some() {
                 break;
@@ -2783,6 +3021,19 @@ impl App {
             let _ = reply.send(browser::error_json(
                 "доступ из браузера выключен в настройках «Хранителя»",
             ));
+            return;
+        }
+        // Пинг и генератор хранилища не требуют — отвечаем сразу.
+        let needs_vault = !matches!(
+            request,
+            browser::BrowserRequest::Ping | browser::BrowserRequest::GeneratePassword
+        );
+        // Заблокировано — не отказываем сразу: поднимаем окно, просим
+        // разблокировать и ответим, когда хранилище откроется.
+        if needs_vault && self.vault.is_none() {
+            self.pending_browser = Some((request, reply));
+            self.focus_password = true;
+            self.status = "Браузер просит доступ — введите мастер-пароль, запрос ждёт.".to_string();
             return;
         }
         match request {
@@ -3593,6 +3844,23 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.start_hidden {
+            self.start_hidden = false;
+            hide_window(self.main_hwnd);
+            // Окно всё равно успевает мелькнуть: прячем ещё раз через полсекунды.
+            self.hide_after = Some(Instant::now() + Duration::from_millis(500));
+        }
+        if let Some(at) = self.hide_after {
+            if Instant::now() >= at {
+                self.hide_after = None;
+                hide_window(self.main_hwnd);
+            } else {
+                ui.ctx().request_repaint_after(at - Instant::now());
+            }
+        }
+        self.handle_close_request(ui.ctx());
+        self.handle_tray_commands(ui.ctx());
+        self.remember_target_window();
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
 
@@ -4013,6 +4281,119 @@ fn default_vault_path() -> String {
 /// и фраза пересоздавалась на каждом кадре — выглядело как бесконечный перебор.
 fn phrase_sample_stale(mode: GenMode, sample_lang: Option<Wordlist>, language: Wordlist) -> bool {
     mode == GenMode::Phrase && sample_lang != Some(language)
+}
+
+/// Дескриптор главного окна: нужен трею, чтобы показать окно из своего потока.
+fn main_window_hwnd(cc: &eframe::CreationContext<'_>) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+        _ => 0,
+    }
+}
+
+fn hide_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowLongPtrW, SetWindowPos, WS_EX_TOOLWINDOW,
+    };
+    // Убираем кнопку с панели задач и Alt+Tab и уводим окно за экран:
+    // прятать через ShowWindow нельзя — egui каждый кадр показывает его снова.
+    let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        SetWindowLongPtrW(window, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as isize);
+        let _ = SetWindowPos(
+            window,
+            None,
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Возвращает окно на экран и в панель задач.
+fn show_window_now(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SW_RESTORE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_TOOLWINDOW,
+    };
+    let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        SetWindowLongPtrW(window, GWL_EXSTYLE, style & !(WS_EX_TOOLWINDOW.0 as isize));
+        let _ = SetWindowPos(
+            window,
+            None,
+            100,
+            100,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+        );
+        let _ = ShowWindow(window, SW_RESTORE);
+        let _ = SetForegroundWindow(window);
+    }
+}
+
+/// Включает или выключает автозапуск при входе в Windows (ключ Run).
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    use windows::Win32::Foundation::WIN32_ERROR;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
+        RegOpenKeyExW, RegSetValueExW,
+    };
+    use windows::core::HSTRING;
+
+    const SUCCESS: WIN32_ERROR = WIN32_ERROR(0);
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE: &str = "Hranitel";
+
+    unsafe {
+        let mut key = HKEY::default();
+        let opened = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(RUN_KEY),
+            Some(0),
+            KEY_SET_VALUE,
+            &mut key,
+        );
+        if opened != SUCCESS {
+            return Err(format!("не удалось открыть ключ автозапуска: {opened:?}"));
+        }
+
+        let result = if enabled {
+            let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+            let command = format!("\"{}\" --tray", exe.display());
+            let wide: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
+            let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+            RegSetValueExW(key, &HSTRING::from(VALUE), Some(0), REG_SZ, Some(bytes))
+        } else {
+            // Значения не было — это не ошибка.
+            let status = RegDeleteValueW(key, &HSTRING::from(VALUE));
+            if status == SUCCESS || status == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+                SUCCESS
+            } else {
+                status
+            }
+        };
+        let _ = RegCloseKey(key);
+
+        if result == SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("реестр вернул {result:?}"))
+        }
+    }
 }
 
 /// Имя сайта без зоны: fialkaspb.ru → fialkaspb.
