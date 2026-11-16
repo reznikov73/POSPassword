@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
-    RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_RETURN, VK_TAB,
+    RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetMessageW, GetWindowTextW, GetWindowThreadProcessId, MSG,
@@ -583,16 +583,17 @@ pub fn run_quick(
     title: String,
 ) {
     thread::spawn(move || {
-        if target_hwnd != 0 {
-            // Целевое окно помнит нажатие — сначала возвращаем ему фокус.
-            unsafe {
-                let _ = SetForegroundWindow(HWND(target_hwnd as *mut core::ffi::c_void));
+        // Windows часто отказывает SetForegroundWindow с первого раза, а печатать
+        // в чужое окно нельзя: ждём, пока цель действительно станет активной.
+        let focused = wait_for_target_foreground(target_hwnd, Duration::from_millis(1500));
+        let text = if !focused {
+            "Автоввод: не удалось вернуть фокус целевому окну — переключитесь в него и повторите."
+                .to_string()
+        } else {
+            match type_credentials(&username, &password) {
+                Ok(()) => format!("Логин и пароль введены в активное окно: {title}."),
+                Err(err) => format!("Автоввод не удался: {err}."),
             }
-            thread::sleep(Duration::from_millis(250));
-        }
-        let text = match type_credentials(&username, &password) {
-            Ok(()) => format!("Логин и пароль введены в активное окно: {title}."),
-            Err(err) => format!("Автоввод не удался: {err}."),
         };
         if let Ok(mut slot) = shared().message.lock() {
             *slot = Some(text);
@@ -601,7 +602,26 @@ pub fn run_quick(
     });
 }
 
-/// Нажата клавиша быстрого доступа: запоминаем целевое окно (то, что было
+/// Возвращает фокус целевому окну и ждёт подтверждения. `false` — не вышло.
+fn wait_for_target_foreground(target: isize, timeout: Duration) -> bool {
+    if target == 0 {
+        return true;
+    }
+    let hwnd = HWND(target as *mut core::ffi::c_void);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if unsafe { GetForegroundWindow() } == hwnd {
+            return true;
+        }
+        unsafe {
+            let _ = SetForegroundWindow(hwnd);
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+}
 /// активно до нас), поднимаем главное окно «Хранителя» и просим перерисовки.
 fn quick_pressed(ctx: &egui::Context) {
     let window = unsafe { GetForegroundWindow() };
@@ -741,6 +761,10 @@ fn autotype_once() -> String {
 }
 
 fn type_credentials(username: &str, password: &str) -> Result<(), String> {
+    // Порядок зависит от того, куда поставлен курсор: если в поле пароля,
+    // привычная «логин → Tab → пароль» поменяла бы их местами.
+    let order = crate::uia::fill_order(crate::uia::focused_field());
+
     // Горячая клавиша приходит в момент нажатия, когда Ctrl/Alt ещё зажаты.
     // Если начать печатать сразу, Windows отдаёт символы как сочетания
     // (Ctrl+U, Alt+P…), и в чужом окне не появляется ничего.
@@ -750,11 +774,33 @@ fn type_credentials(username: &str, password: &str) -> Result<(), String> {
         return Err("активно окно «Хранителя» — переключитесь в целевое окно".to_string());
     }
 
-    if !username.is_empty() {
-        send_text(username)?;
-        send_virtual(VK_TAB)?;
+    match order {
+        crate::uia::FillOrder::LoginThenPassword => {
+            if !username.is_empty() {
+                send_text(username)?;
+                send_virtual(VK_TAB)?;
+            }
+            send_text(password)?;
+        }
+        crate::uia::FillOrder::PasswordThenLogin => {
+            send_text(password)?;
+            if !username.is_empty() {
+                thread::sleep(Duration::from_millis(80));
+                send_shift_tab()?;
+                thread::sleep(Duration::from_millis(80));
+                // Слева текстовое поле — печатаем логин; иначе возвращаемся
+                // на пароль, чтобы не испортить соседний элемент формы.
+                if matches!(
+                    crate::uia::focused_field(),
+                    Some(crate::uia::FocusedField::Text)
+                ) {
+                    send_text(username)?;
+                } else {
+                    send_virtual(VK_TAB)?;
+                }
+            }
+        }
     }
-    send_text(password)?;
     send_virtual(VK_RETURN)?;
     Ok(())
 }
@@ -799,31 +845,36 @@ fn send_text(text: &str) -> Result<(), String> {
 }
 
 fn send_virtual(key: VIRTUAL_KEY) -> Result<(), String> {
-    let down = INPUT {
+    send(&[key_input(key, false), key_input(key, true)])
+}
+
+/// Shift+Tab: вернуться из поля пароля в предыдущее поле формы.
+fn send_shift_tab() -> Result<(), String> {
+    send(&[
+        key_input(VK_SHIFT, false),
+        key_input(VK_TAB, false),
+        key_input(VK_TAB, true),
+        key_input(VK_SHIFT, true),
+    ])
+}
+
+fn key_input(key: VIRTUAL_KEY, released: bool) -> INPUT {
+    INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: key,
                 wScan: 0,
-                dwFlags: KEYBD_EVENT_FLAGS(0),
+                dwFlags: if released {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
-    };
-    let up = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                wScan: 0,
-                dwFlags: KEYEVENTF_KEYUP,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    send(&[down, up])
+    }
 }
 
 fn unicode_input(unit: u16, released: bool) -> INPUT {

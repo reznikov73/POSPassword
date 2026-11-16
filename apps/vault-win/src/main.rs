@@ -12,6 +12,7 @@ mod browser;
 mod filedialog;
 mod hello_win;
 mod help;
+mod uia;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -603,6 +604,8 @@ struct App {
     quick_capture: bool,
     /// Палитра быстрого доступа, открыта пока поле не None.
     quick_access: Option<QuickAccess>,
+    /// Адрес страницы, прочитанный в фоне: палитра подставит сайт в поиск.
+    quick_prefill: Option<std::sync::mpsc::Receiver<String>>,
     /// Момент, когда надо выполнить автоввод после кнопки с отсчётом.
     autotype_countdown: Option<Instant>,
     /// Сообщение автоввода на несколько секунд поверх окна.
@@ -722,6 +725,7 @@ impl App {
             quick_error: None,
             quick_capture: false,
             quick_access: None,
+            quick_prefill: None,
             kind_filter: KindGroup::All,
             gen_open: false,
             gen_mode: GenMode::Chars,
@@ -768,6 +772,7 @@ impl App {
         self.desc_open = false;
         // Палитра быстрого доступа тоже не переживает блокировку.
         self.quick_access = None;
+        self.quick_prefill = None;
         // Запрос расширения, повисший в диалоге, отвечаем отказом.
         if let Some(ask) = self.browser_ask.take() {
             ask.deny("Хранилище заблокировано — откройте его и повторите вход на сайте.");
@@ -802,6 +807,18 @@ impl App {
                     target_hwnd: request.hwnd,
                     focus: true,
                 });
+                // Адрес страницы читает отдельный поток: UI Automation в
+                // Chromium может думать до секунды, палитра ждать не должна.
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let hwnd = request.hwnd;
+                std::thread::spawn(move || {
+                    let query = uia::address_bar_url(hwnd)
+                        .as_deref()
+                        .map(App::site_domain)
+                        .unwrap_or_default();
+                    let _ = sender.send(query);
+                });
+                self.quick_prefill = Some(receiver);
                 self.status =
                     "Быстрый доступ: начните печатать, Enter — ввести в окно.".to_string();
             } else {
@@ -3185,6 +3202,11 @@ impl App {
     /// подходящие целевому окну наверх и по Enter возвращает фокус окну
     /// и печатает туда логин и пароль.
     fn quick_access_dialog(&mut self, ctx: &egui::Context, vault: &mut Vault) {
+        if self.quick_access.is_none() {
+            self.quick_prefill = None;
+            return;
+        }
+        self.pull_quick_prefill(vault);
         let Some(quick) = self.quick_access.as_mut() else {
             return;
         };
@@ -3364,6 +3386,31 @@ impl App {
             title,
         );
         self.quick_access = None;
+        self.quick_prefill = None;
+    }
+
+    /// Забирает адрес страницы из фонового чтения и подставляет его в поиск.
+    fn pull_quick_prefill(&mut self, vault: &Vault) {
+        let Some(receiver) = self.quick_prefill.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(query) => {
+                let Some(quick) = self.quick_access.as_mut() else {
+                    return;
+                };
+                if !quick.query.is_empty() || query.is_empty() {
+                    return;
+                }
+                // Записей для полного домена нет — ищем по имени сайта:
+                // fialkaspb.ru → fialkaspb.
+                let exact = vault.items().iter().any(|item| item.matches(&query));
+                quick.query = if exact { query } else { site_label(&query) };
+                quick.cursor = 0;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => self.quick_prefill = Some(receiver),
+            Err(_) => {}
+        }
     }
 
     /// Массовое добавление осмысленных описаний записям без заметок.
@@ -3966,6 +4013,11 @@ fn default_vault_path() -> String {
 /// и фраза пересоздавалась на каждом кадре — выглядело как бесконечный перебор.
 fn phrase_sample_stale(mode: GenMode, sample_lang: Option<Wordlist>, language: Wordlist) -> bool {
     mode == GenMode::Phrase && sample_lang != Some(language)
+}
+
+/// Имя сайта без зоны: fialkaspb.ru → fialkaspb.
+fn site_label(domain: &str) -> String {
+    domain.split('.').next().unwrap_or(domain).to_string()
 }
 
 /// Пароль из браузера отдаём только когда в запросе есть адрес страницы и
