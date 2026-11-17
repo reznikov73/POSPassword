@@ -18,3 +18,9 @@
 # Служебные инструменты песочницы, не часть проекта
 /scripts/split_main.py
 /scripts/stub-bin/
+
+# Артефакты рабочей среды, не часть проекта
+/skills/
+/upload/
+/tool-results/
+/download/
