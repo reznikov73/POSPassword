@@ -19,6 +19,7 @@ mod export;
 mod generator;
 mod hello;
 mod import;
+mod lock;
 mod model;
 mod passphrase;
 mod psl;
@@ -35,7 +36,8 @@ pub use export::{ExportFormat, export_csv, export_json};
 pub use generator::{GeneratorOptions, generate_password, password_entropy_bits};
 pub use hello::{generate_wrapping_key, protected_wrapping_key, sidecar_path};
 pub use import::{ImportFormat, ImportSummary, import_file};
-pub use model::{Field, Item, ItemKind, VaultData};
+pub use lock::{FileLock, lock_path};
+pub use model::{Field, Item, ItemKind, PASSWORD_HISTORY_MAX, PasswordVersion, VaultData};
 pub use passphrase::{
     PassphraseOptions, Separator, Wordlist, generate_passphrase, passphrase_entropy_bits,
 };
@@ -44,4 +46,4 @@ pub use sites::{
     MatchStrength, normalize_host, registrable_domain, url_matches, url_matches_title,
 };
 pub use totp::{Totp, now_secs};
-pub use vault::{FORMAT_VERSION, MAGIC, Vault};
+pub use vault::{FORMAT_VERSION, KdfPreset, MAGIC, Vault, backup_path};

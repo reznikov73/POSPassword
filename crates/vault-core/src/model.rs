@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::Error;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -234,6 +236,24 @@ impl Field {
     }
 }
 
+/// Прежняя версия пароля. Значение зануляется при уничтожении структуры,
+/// поэтому пароль не остаётся в куче после удаления истории.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasswordVersion {
+    pub value: String,
+    /// Дата, когда этот пароль перестал быть текущим (unix-секунды).
+    pub changed_at: i64,
+}
+
+impl Drop for PasswordVersion {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+/// Сколько прежних паролей хранится у записи.
+pub const PASSWORD_HISTORY_MAX: usize = 5;
+
 /// Одна запись хранилища. Секретные поля зануляются при уничтожении структуры.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Item {
@@ -246,6 +266,13 @@ pub struct Item {
     pub password: String,
     #[serde(default)]
     pub url: String,
+    /// В избранном ли запись (показывается звездёй и фильтром «Избранное»).
+    #[serde(default)]
+    pub favorite: bool,
+    /// Прежние пароли записи, не более `PASSWORD_HISTORY_MAX`, самые свежие
+    /// первыми. Новые поля старые файлы читают пустыми (serde default).
+    #[serde(default)]
+    pub password_history: Vec<PasswordVersion>,
     /// Дополнительные сайты записи: один сервис часто живёт на нескольких
     /// адресах (логин, кабинет, форум). Основной `url` — для совместимости
     /// со старыми файлами; поиск и матчинг идут по всем адресам сразу.
@@ -272,6 +299,8 @@ impl Item {
             username: String::new(),
             password: String::new(),
             url: String::new(),
+            favorite: false,
+            password_history: Vec::new(),
             urls: Vec::new(),
             notes: String::new(),
             tags: Vec::new(),
@@ -279,6 +308,70 @@ impl Item {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Меняет пароль, а прежний непустой уносит в историю (с прежней датой
+    /// обновления записи). История не растёт выше `PASSWORD_HISTORY_MAX`.
+    /// Один и тот же метод используется интерфейсом и мостом браузера.
+    pub fn set_password(&mut self, new_password: &str) {
+        if !self.password.is_empty() && self.password != new_password {
+            self.password_history.insert(
+                0,
+                PasswordVersion {
+                    value: std::mem::take(&mut self.password),
+                    changed_at: self.updated_at,
+                },
+            );
+            self.password_history.truncate(PASSWORD_HISTORY_MAX);
+        }
+        self.password = new_password.to_string();
+    }
+
+    /// Собирает историю при замене записи целиком: берётся история прежней
+    /// версии записи, а если пароль менялся — и её текущий пароль с прежней
+    /// датой обновления. Используется `Vault::update`, поэтому правка из
+    /// окна, из моста браузера и из CLI пишет историю одинаково.
+    pub fn absorb_password_history(
+        &mut self,
+        mut history: Vec<PasswordVersion>,
+        old_password: &str,
+        old_updated_at: i64,
+    ) {
+        if !old_password.is_empty() && old_password != self.password {
+            history.insert(
+                0,
+                PasswordVersion {
+                    value: old_password.to_string(),
+                    changed_at: old_updated_at,
+                },
+            );
+            history.truncate(PASSWORD_HISTORY_MAX);
+        }
+        self.password_history = history;
+    }
+
+    /// Возвращает версию из истории текущим паролем; прежний текущий
+    /// уходит в историю. Возвращает ошибку при неверном индексе.
+    pub fn restore_password_version(&mut self, index: usize) -> Result<(), Error> {
+        if index >= self.password_history.len() {
+            return Err(Error::InvalidFormat(format!(
+                "нет версии пароля с номером {index}"
+            )));
+        }
+        let mut version = self.password_history.remove(index);
+        let restored = std::mem::take(&mut version.value);
+        let current = std::mem::replace(&mut self.password, restored);
+        if !current.is_empty() {
+            self.password_history.insert(
+                0,
+                PasswordVersion {
+                    value: current,
+                    changed_at: self.updated_at,
+                },
+            );
+            self.password_history.truncate(PASSWORD_HISTORY_MAX);
+        }
+        Ok(())
     }
 
     /// Запись с готовым набором полей для своего типа.
@@ -367,6 +460,9 @@ impl Drop for Item {
     fn drop(&mut self) {
         self.password.zeroize();
         self.notes.zeroize();
+        for version in &mut self.password_history {
+            version.value.zeroize();
+        }
         for field in &mut self.fields {
             if field.sensitive {
                 field.value.zeroize();
@@ -386,7 +482,7 @@ pub struct VaultData {
 impl Default for VaultData {
     fn default() -> Self {
         Self {
-            schema: 3,
+            schema: 4,
             items: Vec::new(),
         }
     }

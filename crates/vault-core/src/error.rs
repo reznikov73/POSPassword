@@ -38,6 +38,9 @@ pub enum Error {
     #[error("хранилище заблокировано")]
     Locked,
 
+    #[error("хранилище занято другим процессом: {0}")]
+    Busy(String),
+
     #[error("некорректный путь: {0}")]
     BadPath(PathBuf),
 }

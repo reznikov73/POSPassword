@@ -29,7 +29,10 @@ fn describe_missing_notes_fills_only_empty_notes() {
     // Повторный запуск не меняет ничего: заметки уже не пустые.
     assert_eq!(vault.describe_missing_notes().expect("повтор"), 0);
 
-    // Описание попало в файл: после расшифровки оно на месте.
+    // Описание попало в файл: после расшифровки оно на месте. Первый
+    // экземпляр закрываем — модель KeePass: занятое другим процессом
+    // (здесь — этим же) хранилище не открывается.
+    drop(vault);
     let reopened = Vault::open(&path, "master-password").expect("открытие");
     assert!(
         reopened

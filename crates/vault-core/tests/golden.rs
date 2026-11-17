@@ -4,6 +4,10 @@
 //! заморожены. Тесты проверяют: новая версия открывает старый файл,
 //! читает все данные, сохраняет и открывает снова без потерь —
 //! по данным; побайтового равенства нет (schema 4, свежий nonce).
+//!
+//! Каждый тест работает с собственной копией фикстуры во временном
+//! каталоге: так параллельные тесты не спорят за блокировку файла
+//! (Ф-6) и не оставляют сайдкар-локи рядом с фикстурами.
 
 use std::path::PathBuf;
 use vault_core::{Item, Vault};
@@ -16,28 +20,31 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Копирует фикстуру во временный каталог и открывает копию.
+fn open_copy(name: &str, dir: &tempfile::TempDir) -> Vault {
+    let source = fixture(name);
+    assert!(source.exists(), "нет фикстуры {name}");
+    let copy = dir.path().join(name);
+    std::fs::copy(&source, &copy).unwrap();
+    Vault::open(&copy, PASSWORD).expect("открыть golden-файл 0.12.3")
+}
+
 fn snapshot(items: &[Item]) -> Vec<Item> {
     items.to_vec()
 }
 
 fn roundtrip(name: &str, expected_items: usize) {
-    let path = fixture(name);
-    assert!(path.exists(), "нет фикстуры {name}");
+    let dir = tempfile::tempdir().unwrap();
 
-    // Открыть оригинал, прочитать.
-    let vault = Vault::open(&path, PASSWORD).expect("открыть golden-файл 0.12.3");
+    // Открыть копию, прочитать.
+    let vault = open_copy(name, &dir);
     let before = snapshot(vault.items());
     assert_eq!(before.len(), expected_items, "число записей в {name}");
 
-    // Сохранить копию (файл фикстуры не трогаем) и открыть снова.
-    let tmp = tempfile::tempdir().unwrap();
-    let copy = tmp.path().join("roundtrip.opvault");
-    std::fs::copy(&path, &copy).unwrap();
-    let vault2 = Vault::open(&copy, PASSWORD).expect("открыть копию");
-    vault2.save().expect("сохранить копию новым кодом");
-    drop(vault2);
-
-    let reopened = Vault::open(&copy, PASSWORD).expect("открыть сохранённое");
+    // Сохранить и открыть снова: схема обновляется до 4, данные — те же.
+    vault.save().expect("сохранить копию новым кодом");
+    drop(vault);
+    let reopened = Vault::open(dir.path().join(name), PASSWORD).expect("открыть сохранённое");
     let after = snapshot(reopened.items());
 
     assert_eq!(
@@ -53,16 +60,17 @@ fn roundtrip(name: &str, expected_items: usize) {
         assert_eq!(a.password, b.password, "пароль");
         assert_eq!(a.url, b.url, "основной сайт");
         assert_eq!(a.urls, b.urls, "дополнительные сайты");
+        assert_eq!(a.favorite, b.favorite, "избранное");
+        assert!(
+            a.password_history.is_empty() && b.password_history.is_empty(),
+            "история пароля в фикстурах 0.12.x должна быть пуста"
+        );
         assert_eq!(a.notes, b.notes, "заметки");
         assert_eq!(a.tags, b.tags, "теги");
         assert_eq!(a.fields, b.fields, "поля");
         assert_eq!(a.created_at, b.created_at, "дата создания");
         assert_eq!(a.updated_at, b.updated_at, "дата обновления");
     }
-
-    // Старый файл по-прежнему открывается и не изменился.
-    let again = Vault::open(&path, PASSWORD).expect("повторно открыть оригинал");
-    assert_eq!(again.items().len(), expected_items);
 }
 
 #[test]
@@ -83,7 +91,8 @@ fn golden_all_kinds_roundtrip() {
 /// Проверка содержимого логинов: TOTP-поле, urls и теги читаются.
 #[test]
 fn golden_logins_content() {
-    let vault = Vault::open(fixture("golden_logins_0123.opvault"), PASSWORD).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = open_copy("golden_logins_0123.opvault", &dir);
     let github = vault
         .items()
         .iter()
@@ -97,7 +106,10 @@ fn golden_logins_content() {
             .any(|f| f.label == "TOTP" && f.sensitive)
     );
     assert!(github.tags.contains(&"разработка".to_string()));
-    let card_vault = Vault::open(fixture("golden_all_kinds_0123.opvault"), PASSWORD).unwrap();
+    drop(vault);
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let card_vault = open_copy("golden_all_kinds_0123.opvault", &dir2);
     let card = card_vault
         .items()
         .iter()

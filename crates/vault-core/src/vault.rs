@@ -10,6 +10,7 @@ use crate::crypto::{self, KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 use crate::describe;
 use crate::export::{ExportFormat, export_csv, export_json};
 use crate::hello::{self, HelloEnvelope};
+use crate::lock;
 use crate::model::{Item, VaultData, now_secs};
 use crate::{Error, Result};
 
@@ -19,6 +20,46 @@ pub const FORMAT_VERSION: u16 = 1;
 const KDF_ARGON2ID: u8 = 1;
 const HEADER_LEN: usize = 8 + 2 + 1 + 4 * 3 + SALT_LEN + NONCE_LEN;
 const MIN_PASSWORD_LEN: usize = 8;
+
+/// Пресет стойкости Argon2 при создании и смене мастер-пароля (Б-6).
+///
+/// Параметры пишутся в заголовок файла под AAD, поэтому усиленный файл
+/// открывается только с теми же параметрами — формат не меняется.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KdfPreset {
+    /// 64 МиБ, 3 итерации — как в предыдущих версиях.
+    Standard,
+    /// 128 МиБ, 4 итерации.
+    Hardened,
+    /// 256 МиБ, 4 итерации; на слабых ПК разблокировка занимает секунды.
+    Maximum,
+}
+
+impl KdfPreset {
+    pub fn params(self) -> KdfParams {
+        match self {
+            Self::Standard => KdfParams::default(),
+            Self::Hardened => KdfParams {
+                m_cost: 128 * 1024,
+                t_cost: 4,
+                p_cost: 1,
+            },
+            Self::Maximum => KdfParams {
+                m_cost: 256 * 1024,
+                t_cost: 4,
+                p_cost: 1,
+            },
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Стандарт (64 МиБ, 3 итерации)",
+            Self::Hardened => "Усиленный (128 МиБ, 4 итерации)",
+            Self::Maximum => "Максимальный (256 МиБ, 4 итерации)",
+        }
+    }
+}
 
 /// Заголовок файла. Хранится в открытом виде, но целиком аутентифицируется
 /// как AAD, поэтому изменить параметры KDF или соль незаметно нельзя.
@@ -96,11 +137,24 @@ pub struct Vault {
     kdf: KdfParams,
     salt: [u8; SALT_LEN],
     data: VaultData,
+    /// Блокировка от параллельной записи (Ф-6): живёт, пока открыто
+    /// хранилище; в `save` писать можно, конкурентов быть не должно.
+    lock: lock::FileLock,
 }
 
 impl Vault {
-    /// Создаёт новое пустое хранилище. Существующий файл не перезаписывается.
+    /// Создаёт новое пустое хранилище со стандартным пресетом Argon2.
+    /// Существующий файл не перезаписывается.
     pub fn create(path: impl Into<PathBuf>, password: &str) -> Result<Self> {
+        Self::create_with_preset(path, password, KdfPreset::Standard)
+    }
+
+    /// Создаёт новое пустое хранилище с выбранным пресетом стойкости (Б-6).
+    pub fn create_with_preset(
+        path: impl Into<PathBuf>,
+        password: &str,
+        preset: KdfPreset,
+    ) -> Result<Self> {
         let path = path.into();
         if path.exists() {
             return Err(Error::InvalidFormat(format!(
@@ -109,8 +163,9 @@ impl Vault {
             )));
         }
         validate_master_password(password)?;
+        let lock = lock::FileLock::acquire(&path)?;
 
-        let kdf = KdfParams::default();
+        let kdf = preset.params();
         let mut salt = [0u8; SALT_LEN];
         crypto::random_bytes(&mut salt);
         let key = crypto::derive_key(password.as_bytes(), &salt, kdf)?;
@@ -121,6 +176,7 @@ impl Vault {
             kdf,
             salt,
             data: VaultData::default(),
+            lock,
         };
         vault.save()?;
         // У пути мог остаться сайдкар от прежнего хранилища: он заворачивал
@@ -129,14 +185,16 @@ impl Vault {
         Ok(vault)
     }
 
-    /// Открывает и расшифровывает хранилище.
+    /// Открывает и расшифровывает хранилище. Захватывает блокировку файла
+    /// до закрытия хранилища: вторая программа получит «занято» (Ф-6).
     pub fn open(path: impl Into<PathBuf>, password: &str) -> Result<Self> {
         let path = path.into();
+        let lock = lock::FileLock::acquire(&path)?;
         let bytes = fs::read(&path)?;
         let header = Header::decode(&bytes)?;
 
         let key = crypto::derive_key(password.as_bytes(), &header.salt, header.kdf)?;
-        Self::open_decrypted(path, key, header, &bytes)
+        Self::open_decrypted(path, key, header, &bytes, lock)
     }
 
     /// Открывает хранилище ключом, развёрнутым из обёртки Windows Hello.
@@ -150,9 +208,10 @@ impl Vault {
         let envelope = HelloEnvelope::read(&hello::sidecar_path(&path))?;
         let key = envelope.open(wrapping_key)?;
 
+        let lock = lock::FileLock::acquire(&path)?;
         let bytes = fs::read(&path)?;
         let header = Header::decode(&bytes)?;
-        Self::open_decrypted(path, key, header, &bytes)
+        Self::open_decrypted(path, key, header, &bytes, lock)
     }
 
     /// Общая часть `open` и `open_with_hello`: расшифровка и разбор данных.
@@ -161,6 +220,7 @@ impl Vault {
         key: Zeroizing<[u8; KEY_LEN]>,
         header: Header,
         bytes: &[u8],
+        lock: lock::FileLock,
     ) -> Result<Self> {
         let header_bytes = &bytes[..HEADER_LEN];
         let plaintext = crypto::open(&key, &header.nonce, &bytes[HEADER_LEN..], header_bytes)?;
@@ -172,6 +232,7 @@ impl Vault {
             kdf: header.kdf,
             salt: header.salt,
             data,
+            lock,
         })
     }
 
@@ -231,7 +292,9 @@ impl Vault {
         Ok(count)
     }
 
-    /// Заменяет запись с тем же id, сохраняя дату создания.
+    /// Заменяет запись с тем же id, сохраняя дату создания. Если пароль
+    /// изменился, прежний непустой уходит в историю пароля (Ф-2) — так
+    /// правка из окна, из моста браузера и из CLI пишется одинаково.
     pub fn update(&mut self, mut item: Item) -> Result<()> {
         let existing = self
             .data
@@ -241,6 +304,10 @@ impl Vault {
             .ok_or_else(|| Error::ItemNotFound(item.id.to_string()))?;
         item.created_at = existing.created_at;
         item.updated_at = now_secs();
+        let old_history = std::mem::take(&mut existing.password_history);
+        let old_password = existing.password.clone();
+        let old_updated = existing.updated_at;
+        item.absorb_password_history(old_history, &old_password, old_updated);
         *existing = item;
         self.save()
     }
@@ -273,16 +340,38 @@ impl Vault {
         Ok(count)
     }
 
-    /// Меняет мастер-пароль: новая соль, новый ключ, та же полезная нагрузка.
-    /// Обёртка Windows Hello заворачивала прежний ключ — сайдкар удаляется.
+    /// Меняет мастер-пароль с теми же параметрами Argon2.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
+        self.change_password_with_preset(new_password, self.kdf)
+    }
+
+    /// Меняет мастер-пароль и параметры Argon2 (апгрейд пресета, Б-6):
+    /// новая соль, новый ключ, та же полезная нагрузка. Обёртка Windows
+    /// Hello заворачивала прежний ключ — сайдкар удаляется.
+    pub fn change_password_with_preset(
+        &mut self,
+        new_password: &str,
+        kdf: KdfParams,
+    ) -> Result<()> {
         validate_master_password(new_password)?;
         let mut salt = [0u8; SALT_LEN];
         crypto::random_bytes(&mut salt);
-        self.key = crypto::derive_key(new_password.as_bytes(), &salt, self.kdf)?;
+        self.key = crypto::derive_key(new_password.as_bytes(), &salt, kdf)?;
+        self.kdf = kdf;
         self.salt = salt;
         self.save()?;
         remove_hello_sidecar(&self.path)
+    }
+
+    /// Текущие параметры Argon2 (для подсказки в интерфейсе).
+    pub fn kdf_params(&self) -> KdfParams {
+        self.kdf
+    }
+
+    /// Удерживается ли блокировка файла (всегда true у открытого хранилища;
+    /// метод нужен, чтобы поле не казалось мёртвым, и для тестов).
+    pub fn holds_file_lock(&self) -> bool {
+        self.lock.holds()
     }
 
     /// Включает разблокировку через Windows Hello: заворачивает ключ хранилища
@@ -335,8 +424,21 @@ impl Vault {
         out.extend_from_slice(&header_bytes);
         out.extend_from_slice(&ciphertext);
 
+        // Резервная копия: прежняя версия остаётся рядом как <файл>.bak (Ф-5).
+        // Копирование до переименования — не бывает момента, когда основного
+        // файла нет. Ошибка копии не должна мешать сохранить основную версию.
+        if self.path.exists() {
+            let _ = fs::copy(&self.path, backup_path(&self.path));
+        }
         write_atomic(&self.path, &out)
     }
+}
+
+/// Путь автоматической резервной копии: `<файл-хранилища>.bak`.
+pub fn backup_path(vault_path: &Path) -> PathBuf {
+    let mut name = vault_path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
 }
 
 impl std::fmt::Debug for Vault {
