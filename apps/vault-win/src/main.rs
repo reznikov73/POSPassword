@@ -695,7 +695,7 @@ impl App {
         let hotkey = settings.hotkey;
         let quick_hotkey = settings.quick_hotkey;
         let hide_to_tray = settings.tray;
-        let autostart = settings.autostart;
+        let autostart = autostart_enabled();
         let start_hidden = std::env::args().any(|arg| arg == "--tray");
         let main_hwnd = main_window_hwnd(cc);
         let startup_path = settings
@@ -4343,6 +4343,31 @@ fn show_window_now(hwnd: isize) {
         let _ = ShowWindow(window, SW_RESTORE);
         let _ = SetForegroundWindow(window);
     }
+}
+
+/// Включён ли автозапуск на самом деле: смотрим ключ Run, а не settings.txt.
+/// Иначе после установщика (или ручной правки реестра) галочка врёт.
+fn autostart_enabled() -> bool {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::HSTRING;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE: &str = "Hranitel";
+
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(RUN_KEY),
+            &HSTRING::from(VALUE),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    status == ERROR_SUCCESS
 }
 
 /// Включает или выключает автозапуск при входе в Windows (ключ Run).
