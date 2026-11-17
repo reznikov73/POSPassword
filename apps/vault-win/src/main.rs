@@ -15,6 +15,7 @@ mod dialogs;
 mod filedialog;
 mod hello_win;
 mod help;
+mod logging;
 mod settings;
 mod state;
 mod theme;
@@ -49,6 +50,14 @@ fn main() -> eframe::Result {
     // "уже запущен" (так программу поднимает мост из браузера).
     let start_hidden = args.iter().any(|arg| arg == "--tray");
     let quiet = args.iter().any(|arg| arg == "--quiet");
+
+    // Лог-файл с ротацией (Т-4): уровни и действия, без секретов.
+    logging::init();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        start_hidden,
+        "«Хранитель» запущен"
+    );
 
     // Один экземпляр: два окна путают автоввод — горячую клавишу держит только одно.
     if other_instance_running() {

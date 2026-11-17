@@ -226,10 +226,11 @@ fn log_client(pipe: HANDLE) {
                 })
                 .unwrap_or_else(|| format!("pid {pid}, образ неизвестен"))
         };
-        // TODO(Т-4): заменить на tracing с записью в лог-файл.
-        eprintln!("мост: подключение pid={pid} образ={image}");
+        // Б-3а: диагностика подключений. Названия записей и секреты в лог
+        // не пишутся — только PID, образ и факт.
+        tracing::info!(pid, image = %image, "мост: подключение клиента");
         if !image.contains("browser-host") && !image.is_empty() {
-            eprintln!("мост: внимание — подключился не browser-host: {image}");
+            tracing::warn!(image = %image, "мост: подключился не browser-host");
         }
     }
 }

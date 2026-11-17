@@ -818,6 +818,7 @@ impl App {
     }
 
     pub(crate) fn lock(&mut self, reason: &str) {
+        tracing::info!("блокировка: {reason}");
         // Висящий запрос браузера/палитры без хранилища исполнить нельзя.
         if let Some((_, reply)) = self.pending_browser.take() {
             let _ = reply.send(browser::error_json(
@@ -985,6 +986,14 @@ impl App {
 
         match result {
             Ok(vault) => {
+                tracing::info!(
+                    mode = if mode == Mode::Create {
+                        "создано"
+                    } else {
+                        "открыто"
+                    },
+                    "хранилище готово"
+                );
                 let first = vault.items_sorted().first().map(|item| item.id);
                 self.status = match mode {
                     Mode::Open => "Хранилище открыто.".to_string(),
