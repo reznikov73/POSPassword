@@ -33,7 +33,7 @@ fn roundtrip(name: &str, expected_items: usize) {
     let tmp = tempfile::tempdir().unwrap();
     let copy = tmp.path().join("roundtrip.opvault");
     std::fs::copy(&path, &copy).unwrap();
-    let mut vault2 = Vault::open(&copy, PASSWORD).expect("открыть копию");
+    let vault2 = Vault::open(&copy, PASSWORD).expect("открыть копию");
     vault2.save().expect("сохранить копию новым кодом");
     drop(vault2);
 

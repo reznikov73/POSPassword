@@ -27,7 +27,7 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("создать каталог fixtures");
 
     // 1. Пустое хранилище.
-    let mut empty = Vault::create(dir.join("golden_empty_0123.opvault"), PASSWORD).unwrap();
+    let empty = Vault::create(dir.join("golden_empty_0123.opvault"), PASSWORD).unwrap();
     empty.save().unwrap();
 
     // 2. Логины: несколько сайтов, теги, TOTP, чувствительные поля.
