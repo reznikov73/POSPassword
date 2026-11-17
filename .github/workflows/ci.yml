@@ -1,0 +1,68 @@
+# Непрерывная интеграция: проверка каждого пуша.
+#
+# Два раннера:
+#   windows — весь workspace (включая тесты vault-win с DPAPI и Win32),
+#   ubuntu  — платформенно-независимые крейты и кросс-таргет-проверка
+#             vault-win без линковки (для check/clippy линкер не нужен).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows (полный workspace)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Форматирование
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Аудит зависимостей
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+  ubuntu:
+    name: Ubuntu (ядро + кросс-таргет GUI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (платформенно-независимые крейты)
+        run: cargo clippy -p vault-core -p vault-cli -p browser-host --all-targets -- -D warnings
+
+      - name: Тесты (платформенно-независимые крейты)
+        run: cargo test -p vault-core -p vault-cli -p browser-host
+
+      # windows-future не собирается под линукс-таргетом, поэтому оконный
+      # клиент проверяется кросс-таргетом: check/clippy идут без линковки.
+      - name: Clippy vault-win (кросс-таргет)
+        run: cargo clippy -p vault-win --target x86_64-pc-windows-msvc --all-targets -- -D warnings
