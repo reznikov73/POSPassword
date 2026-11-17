@@ -1,0 +1,6 @@
+#!/bin/sh
+# Заглушка windres для кросс-таргет clippy: объектник не линкуется при check
+out=""
+for a in "$@"; do case "$a" in -o) out=next;; next) out="$a"; break;; esac; done
+[ -n "$out" ] && : > "$out"
+exit 0

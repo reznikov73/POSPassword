@@ -1,0 +1,11 @@
+#!/bin/sh
+# Заглушка llvm-rc для кросс-таргет clippy: .res нужен только при линковке
+out=""
+prev=""
+for a in "$@"; do
+  case "$prev" in /fo) out="$a"; break;; esac
+  case "$a" in /fo*) out="${a#/fo}"; break;; esac
+  prev="$a"
+done
+[ -n "$out" ] && : > "$out"
+exit 0
