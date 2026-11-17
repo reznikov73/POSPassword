@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<!-- saved from url=(0054)file:///E:/Downloads/Qwen_html_20261117_ayvghxiw4.html -->
+<html lang="ru"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<title>ТЗ — Хранитель 0.13.0</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color:#101216; font-size:10.5pt; line-height:1.45; margin:0; }
+  .page { max-width:182mm; margin:0 auto; padding:10mm; }
+  h1 { font-size:19pt; color:#265CB4; margin:0 0 2mm; }
+  .sub { font-size:12pt; color:#101216; margin:0 0 4mm; font-weight:600; }
+  h2 { font-size:13pt; color:#265CB4; border-bottom:1.5pt solid #265CB4; padding-bottom:1mm; margin:7mm 0 3mm; page-break-after:avoid; }
+  h3 { font-size:11pt; margin:4mm 0 2mm; page-break-after:avoid; }
+  .meta { color:#5C6270; font-size:9.5pt; margin-bottom:5mm; }
+  .meta b { color:#101216; }
+  table { width:100%; border-collapse:collapse; font-size:9pt; margin:2mm 0 4mm; }
+  th { background:#265CB4; color:#fff; text-align:left; padding:2mm; font-size:9pt; }
+  td { border:.5pt solid #C7CEDA; padding:1.8mm 2mm; vertical-align:top; }
+  tr:nth-child(even) td { background:#F4F6FA; }
+  tr { page-break-inside:avoid; }
+  td.id { font-weight:700; color:#265CB4; white-space:nowrap; width:13mm; }
+  ul { margin:1mm 0 3mm; padding-left:5mm; }
+  li { margin-bottom:1mm; }
+  .note { background:#ECEFF4; border-left:3pt solid #265CB4; padding:2.5mm 3mm; font-size:9.5pt; margin:3mm 0; }
+  .fig { margin:3mm 0; }
+  .fig svg { width:100%; height:auto; border:.5pt solid #C7CEDA; }
+  .cap { font-size:8.5pt; color:#5C6270; margin-top:1mm; }
+  .pill { display:inline-block; background:#DBE7FA; color:#265CB4; border-radius:3mm; padding:.5mm 2.5mm; font-size:8.5pt; font-weight:600; }
+  @media print { .page { padding:0; max-width:none; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Техническое задание</h1>
+<div class="sub">«Хранитель 0.13.0» — светлый интерфейс (макет A) + усиление безопасности</div>
+<div class="meta">
+  <b>Проект:</b> POSPassword / «Хранитель» &nbsp;·&nbsp; <b>Репозиторий:</b> github.com/reznikov73/POSPassword<br>
+  <b>Базовая версия:</b> 0.12.3 &nbsp;·&nbsp; <b>Целевая:</b> 0.13.0 &nbsp;·&nbsp; <b>Дата:</b> 18.11.2026 &nbsp;·&nbsp; <b>Статус:</b> <span class="pill">правки ревью внесены — к реализации</span><br>
+  <b>Основание:</b> ревью проекта 0.12.3; принят макет A «Эволюция текущего» (светлый, две колонки).<br>
+  <b>Ревизия:</b> правки по итогам технического ревью ТЗ от 18.11.2026 (пункты Б-1, Б-3а, Ф-5, Ф-6, И-4, И-6, И-7, И-9, Т-2, Т-3, Т-4 — отмечены <b>[р]</b>).
+</div>
+
+<h2>1. Цель и принципы</h2>
+<p><b>Цель:</b> эволюция главного окна без слома привычек пользователя, закрытие дыр безопасности P0, подготовка кодовой базы к росту.</p>
+<ul>
+  <li>Офлайн, один файл, без аккаунтов и сети.</li>
+  <li><code>FORMAT_VERSION = 1</code> не меняется; новые поля — только через <code>serde(default)</code>.</li>
+  <li><code>vault-core</code> платформенно-независим; все Win32/WinRT — в <code>apps/vault-win</code>.</li>
+  <li>UI и документация — по-русски, код — по-английски; осмысленные коммиты по-русски.</li>
+  <li>Перед коммитом: <code>cargo fmt --all</code>, <code>cargo clippy -- -D warnings</code>, <code>cargo test --workspace</code>.</li>
+  <li>egui/eframe 0.37; новые зависимости — только лёгкие и офлайн (<code>idna</code>, встроенный PSL).</li>
+  <li>Секреты не логировать, не печатать в <code>Debug</code>, занулять.</li>
+</ul>
+
+<h2>2. Объём работ</h2>
+<h3>Входит</h3>
+<p>Интерфейс по макету A; избранное; история пароля; undo удаления; напоминания о сроках; резервные копии; аудит+; безопасность P0 (PSL/IDN, буфер/zeroize, мастер-пароль, Argon2-пресеты, Hello, DACL канала); разрезание <code>main.rs</code>; CI; документация.</p>
+<h3>Не входит (следующие релизы / отдельные ТЗ)</h3>
+<p>Полная ассоциация расширения по секрету (0.14); TPM-привязка Hello; per-item сценарии автоввода; Firefox; корзина и сайдбар (макет B); дашборд (макет C); синхронизация; Android; passkeys; HIBP-проверка (нарушает офлайн-принцип — на обсуждение).</p>
+
+<h2>3. Макет и общие требования к интерфейсу</h2>
+<p>Зоны главного окна сверху вниз: <b>titlebar</b> (версия + путь) → <b>тулбар</b> → <b>чипсы категорий</b> → <b>контент: список слева / карточка справа</b> → <b>статус-бар</b>.</p>
+<div class="fig">
+<svg viewBox="0 0 820 520" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial">
+  <rect x="1" y="1" width="818" height="518" rx="10" fill="#F4F6FA" stroke="#C7CEDA"></rect>
+  <rect x="1" y="1" width="818" height="34" rx="10" fill="#ECEFF4"></rect>
+  <text x="16" y="23" font-size="13" font-weight="700" fill="#101216">Хранитель 0.13.0 — vault.opvault</text>
+  <text x="775" y="23" font-size="12" fill="#5C6270">– □ ✕</text>
+  <g font-size="11" font-weight="600">
+    <rect x="14" y="44" width="78" height="26" rx="6" fill="#265CB4"></rect><text x="53" y="61" fill="#fff" text-anchor="middle">+ Запись</text>
+    <rect x="98" y="44" width="86" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="141" y="61" text-anchor="middle">Генератор</text>
+    <rect x="190" y="44" width="118" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="249" y="61" text-anchor="middle">Быстрая вставка</text>
+    <rect x="314" y="44" width="72" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="350" y="61" text-anchor="middle">Импорт…</text>
+    <rect x="392" y="44" width="74" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="429" y="61" text-anchor="middle">Экспорт…</text>
+    <rect x="560" y="44" width="78" height="26" rx="6" fill="#FAEEDC"></rect><text x="599" y="61" fill="#C07A1E" text-anchor="middle">Аудит · 7</text>
+    <rect x="644" y="44" width="52" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="670" y="61" text-anchor="middle">Hello</text>
+    <rect x="702" y="44" width="46" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="725" y="61" text-anchor="middle">Блок</text>
+    <rect x="754" y="44" width="52" height="26" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="780" y="61" text-anchor="middle">⚙ F1</text>
+  </g>
+  <g font-size="10.5" font-weight="600">
+    <rect x="14" y="80" width="66" height="24" rx="12" fill="#265CB4"></rect><text x="47" y="96" fill="#fff" text-anchor="middle">Все 412</text>
+    <rect x="86" y="80" width="80" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="126" y="96" fill="#5C6270" text-anchor="middle">Логины 301</text>
+    <rect x="172" y="80" width="70" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="207" y="96" fill="#5C6270" text-anchor="middle">Карты 12</text>
+    <rect x="248" y="80" width="66" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="281" y="96" fill="#5C6270" text-anchor="middle">Счета 9</text>
+    <rect x="320" y="80" width="80" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="360" y="96" fill="#5C6270" text-anchor="middle">Заметки 24</text>
+    <rect x="406" y="80" width="96" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="454" y="96" fill="#5C6270" text-anchor="middle">Документы 51</text>
+    <rect x="508" y="80" width="72" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="544" y="96" fill="#5C6270" text-anchor="middle">Ключи 15</text>
+    <rect x="586" y="80" width="110" height="24" rx="12" fill="#fff" stroke="#C7CEDA"></rect><text x="641" y="96" fill="#5C6270" text-anchor="middle">★ Избранное 18</text>
+  </g>
+  <rect x="14" y="116" width="300" height="360" rx="8" fill="#fff" stroke="#C7CEDA"></rect>
+  <rect x="24" y="126" width="280" height="26" rx="6" fill="#F4F6FA" stroke="#C7CEDA"></rect>
+  <text x="34" y="143" font-size="11" fill="#5C6270">🔍 Поиск (Ctrl+F)…</text>
+  <g font-size="11">
+    <rect x="24" y="160" width="280" height="40" rx="6" fill="#DBE7FA"></rect><rect x="24" y="164" width="4" height="32" fill="#265CB4"></rect>
+    <text x="36" y="177" font-weight="700">mail.ru</text><text x="36" y="192" font-size="9.5" fill="#5C6270">ivan@mail.ru · почта</text>
+    <text x="270" y="177" font-size="9" fill="#2E8B57">TOTP</text><text x="290" y="192" fill="#C07A1E">★</text>
+    <text x="36" y="222" font-weight="700">Госуслуги</text><text x="36" y="237" font-size="9.5" fill="#5C6270">+7 921 · gosuslugi.ru</text>
+    <text x="36" y="267" font-weight="700">Карта Тинькофф</text><text x="36" y="282" font-size="9.5" fill="#5C6270">•••• 1234 · tinkoff.ru</text><text x="262" y="267" font-size="9" fill="#C07A1E">12/27</text>
+    <text x="36" y="312" font-weight="700">Паспорт РФ</text><text x="36" y="327" font-size="9.5" fill="#5C6270">документ · срок</text><text x="266" y="312" font-size="9" fill="#C07A1E">45 дн</text>
+    <text x="36" y="357" font-weight="700">ОСАГО РЕСО</text><text x="36" y="372" font-size="9.5" fill="#5C6270">полис ••••</text><text x="246" y="357" font-size="9" fill="#C0392B">просрочен</text>
+  </g>
+  <rect x="326" y="116" width="480" height="360" rx="8" fill="#fff" stroke="#C7CEDA"></rect>
+  <text x="342" y="142" font-size="16" font-weight="700">mail.ru</text><text x="410" y="142" font-size="12" fill="#C07A1E">★</text>
+  <rect x="430" y="128" width="52" height="20" rx="10" fill="#DBE7FA"></rect><text x="456" y="142" font-size="10" fill="#265CB4" text-anchor="middle">Логин</text>
+  <rect x="640" y="126" width="76" height="24" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="678" y="142" font-size="10.5" text-anchor="middle">Изменить</text>
+  <rect x="722" y="126" width="72" height="24" rx="6" fill="#fff" stroke="#C0392B"></rect><text x="758" y="142" font-size="10.5" fill="#C0392B" text-anchor="middle">Удалить</text>
+  <g font-size="11">
+    <text x="342" y="172" font-size="9.5" fill="#5C6270">Логин</text><text x="342" y="188">ivan@mail.ru</text>
+    <text x="342" y="214" font-size="9.5" fill="#5C6270">Пароль</text><text x="342" y="230">••••••••••••••••</text>
+    <rect x="342" y="240" width="40" height="6" rx="3" fill="#2E8B57"></rect><rect x="386" y="240" width="40" height="6" rx="3" fill="#2E8B57"></rect><rect x="430" y="240" width="40" height="6" rx="3" fill="#2E8B57"></rect><rect x="474" y="240" width="40" height="6" rx="3" fill="#2E8B57"></rect><rect x="518" y="240" width="40" height="6" rx="3" fill="#2E8B57"></rect>
+    <text x="566" y="247" font-size="9.5" fill="#2E8B57">≈ 96 бит · очень сильный</text>
+  </g>
+  <rect x="342" y="262" width="448" height="62" rx="8" fill="#DBE7FA"></rect>
+  <text x="356" y="280" font-size="9.5" fill="#5C6270">Одноразовый код (TOTP)</text>
+  <text x="356" y="308" font-size="22" font-weight="700" fill="#265CB4">482 913</text>
+  <circle cx="640" cy="293" r="20" fill="none" stroke="#C7CEDA" stroke-width="4"></circle>
+  <path d="M 640 273 A 20 20 0 0 1 658 300" fill="none" stroke="#265CB4" stroke-width="4"></path>
+  <text x="640" y="297" font-size="10" text-anchor="middle">17с</text>
+  <rect x="676" y="278" width="100" height="30" rx="6" fill="#fff" stroke="#C7CEDA"></rect><text x="726" y="297" font-size="10.5" text-anchor="middle">Копировать</text>
+  <g font-size="11">
+    <text x="342" y="346" font-size="9.5" fill="#5C6270">Сайт</text><text x="342" y="362" fill="#265CB4">https://mail.ru</text>
+    <text x="342" y="388" font-size="9.5" fill="#5C6270">История пароля: 2 версии ▸</text>
+    <text x="342" y="412" font-size="9.5" fill="#5C6270">Создано 12.01.2026 · Обновлено 03.11.2026</text>
+  </g>
+  <rect x="342" y="430" width="170" height="32" rx="8" fill="#265CB4"></rect><text x="427" y="450" font-size="11" fill="#fff" text-anchor="middle">Ввести в окно · 3 с</text>
+  <line x1="1" y1="486" x2="819" y2="486" stroke="#C7CEDA"></line>
+  <text x="16" y="505" font-size="10.5" fill="#5C6270">Записей: 412 · Буфер очистится через 24 с</text>
+  <text x="804" y="505" font-size="10.5" fill="#5C6270" text-anchor="end">Ctrl+Alt+P — автоввод · Ctrl+Shift+Space — быстрый доступ</text>
+</svg>
+<div class="cap">Рис. 1 — Структура главного окна по макету A (схема зон).</div>
+</div>
+<ul>
+  <li>Светлая тема — по умолчанию для новых установок; layout идентичен в тёмной и контрастной темах.</li>
+  <li>Минимальный размер окна 760×520: чипсы переносятся, карточка скроллится, кнопки не наезжают на путь.</li>
+  <li>Обязательные состояния: пустое хранилище, ничего не найдено, запись не выбрана, аудит = 0 («Аудит ✓»), буфер занят (обратный отсчёт).</li>
+  <li>Все действия доступны с клавиатуры; подсказки хоткеев — в статус-баре и hover.</li>
+</ul>
+
+<h2>4. Требования к интерфейсу (И)</h2>
+<table>
+<tbody><tr><th>ID</th><th>Требование</th><th>Критерий приёмки</th></tr>
+<tr><td class="id">И-1</td><td>Тулбар по макету: слева «+ Запись», «Генератор», «Быстрая вставка», «Импорт…», «Экспорт…»; справа «Аудит · N» (янтарный при N&gt;0, зелёный «✓» при 0), Hello, «Заблокировать», ⚙, «Справка F1». «Описания», «Пароль», «Тема» — в меню ⚙.</td><td>Все текущие функции достижимы ≤ 2 клика; счётчик аудита обновляется после каждого сохранения.</td></tr>
+<tr><td class="id">И-2</td><td>Чипсы: Все / Логины / Карты / Счета / Заметки / Документы / Ключи + «★ Избранное», у каждого — счётчик; активный залит акцентом; работают вместе с поиском.</td><td>Ctrl+1…7 переключают категории, Ctrl+8 — избранное; счётчики совпадают со списком.</td></tr>
+<tr><td class="id">И-3</td><td>Строка списка: аватар-буква типа, название, подзаголовок «логин · сайт» (или тип), badge справа: TOTP (зелёный), срок ≤90 дн (янтарный) / просрочен (красный), ★; выделение — акцентная полоса + мягкая заливка.</td><td>Badge видны без открытия карточки; контекстное меню ПКМ: Изменить / Копировать логин / Копировать пароль / В избранное / Удалить.</td></tr>
+<tr><td class="id">И-4</td><td>Карточка: кнопка копирования у каждого поля; пароль — маска + «Показать» + копирование + шкала стойкости (5 сегментов, биты, вердикт); TOTP-блок: код «XXX XXX», кольцо обратного отсчёта, кнопка «Код» (секрет не показывается в карточке, но остаётся доступным в диалоге правки — сценарий переноса кода на другое устройство [р]); «Ещё сайты» и теги — чипсами; даты; внизу «Ввести в окно · 3 с».</td><td>Код и кольцо обновляются раз в секунду; копирование кода — в буфер с 30-с очисткой; шкала совпадает с password_entropy_bits.</td></tr>
+<tr><td class="id">И-5</td><td>«История пароля: N версии» — раскрываемый блок: дата, маска, копирование, «Сделать текущим».</td><td>Восстановление версии меняет пароль, прежний текущий уходит в историю, файл сохраняется.</td></tr>
+<tr><td class="id">И-6</td><td>Undo удаления: после «Удалить» — toast «Запись удалена · Вернуть» на 10 с. Undo-буфер сбрасывается при lock() [р].</td><td>«Вернуть» возвращает запись с тем же id, датами и полями; по таймауту и при блокировке буфер зануляется.</td></tr>
+<tr><td class="id">И-7</td><td>Окно запоминает размер и позицию (size=, pos= в settings.txt), при восстановлении — clamp к экрану. Геометрия пишется только из нормального видимого состояния: скрытое в трей окно (позиция −32000, WS_EX_TOOLWINDOW) и развёрнутое на весь экран состояние не перезаписывают сохранённые значения [р].</td><td>После перезапуска окно там же и того же размера; за пределами экрана не появляется; после «скрыть в трей → выйти» окно при следующем запуске возвращается на прежнее место.</td></tr>
+<tr><td class="id">И-8</td><td>Статус-бар: «Записей: N», обратный отсчёт буфера, подсказки хоткеев (сохранить текущее поведение).</td><td>Подсказка автоввода не врёт после смены сочетания.</td></tr>
+<tr><td class="id">И-9</td><td>Напоминание при разблокировке: если есть истекающие ≤30 дн / просроченные — toast «Истекает: N → Аудит», клик открывает аудит. Порог напоминания (30 дн) — мягче, чем у списка «истекающие» в аудите (90 дн): о ближней границе сообщаем лично, дальнюю видит тот, кто сам открыл аудит. Оба числа фиксированы и задокументированы [р].</td><td>Показывается один раз за разблокировку; при нуле — не показывается.</td></tr>
+<tr><td class="id">И-10</td><td>Пустые состояния по п. 3.</td><td>Каждое состояние отрисовано и не выглядит как ошибка.</td></tr>
+</tbody></table>
+
+<h2>5. Функциональные требования и данные (Ф)</h2>
+<table>
+<tbody><tr><th>ID</th><th>Требование</th><th>Критерий приёмки</th></tr>
+<tr><td class="id">Ф-1</td><td>Item.favorite: bool, serde(default); звезда в карточке/списке/контекстном меню; фильтр «Избранное».</td><td>Старые файлы читаются без миграций; round-trip через файл сохраняет флаг.</td></tr>
+<tr><td class="id">Ф-2</td><td>Item.password_history: Vec&lt;PasswordVersion { value, changed_at }&gt;, ≤5, serde(default); запись при смене пароля (старый непустой → в историю с прежней датой); Drop зануляет значения.</td><td>История не растёт выше 5; смена пароля через GUI/CLI/мост пишет историю одинаково.</td></tr>
+<tr><td class="id">Ф-3</td><td>Аудит+: пароль = логин; пароль содержит имя сайта/домен; офлайн-словарь топ-10 000 паролей (встроен в бинарник). В отчёте — только факт, не значение.</td><td>Новые группы находок с тестами; словарь не индексируется поиском и не попадает в экспорт.</td></tr>
+<tr><td class="id">Ф-4</td><td>Палитра Quick Access: Ctrl+T — копировать TOTP выбранной записи; badge TOTP в строке (опционально: fuzzy-поиск).</td><td>Ctrl+T работает только при открытом хранилище; код очищается из буфера через 30 с.</td></tr>
+<tr><td class="id">Ф-5</td><td>Резервные копии: автоматический &lt;файл&gt;.bak (предыдущая версия, одно поколение) при каждом save — обновляется копированием до атомарного переименования (без окна, в котором основного файла нет [р]); кнопка «Резервная копия…» → копия vault-ГГГГ-ММ-ДД.opvault через системный диалог. <code>*.bak</code> — в .gitignore [р].</td><td>.bak открывается как обычное хранилище; ручная копия побайтово равна исходнику.</td></tr>
+<tr><td class="id">Ф-6</td><td>Защита от параллельной записи (GUI + CLI), модель KeePass [р]: сайдкар-лок &lt;файл&gt;.lock с ОС-блокировкой (flock/LockFileEx, освобождается при смерти процесса); GUI держит лок от открытия хранилища до блокировки/закрытия, CLI — на всё время команды. Это закрывает не только повреждение (его и так гарантирует атомарный rename), но и потерю правок (lost update) вторым писателем.</td><td>Второй писатель получает внятную ошибку «хранилище занято» (GUI-приложение открыто или работает CLI), файл не повреждается и правки не теряются; упавший процесс не оставляет вечного лока.</td></tr>
+</tbody></table>
+<div class="note"><b>Схема данных:</b> VaultData.schema: 3 → 4. Формат файла не меняется. Старое приложение новые поля игнорирует, но при сохранении из старой версии они теряются — зафиксировать в docs/transfer.md и README («обновляйте все копии»).</div>
+
+<h2>6. Требования безопасности (Б)</h2>
+<table>
+<tbody><tr><th>ID</th><th>Требование</th><th>Критерий приёмки</th></tr>
+<tr><td class="id">Б-1</td><td>Полный PSL (включая приватные зоны github.io, herokuapp.com…) вместо списка из 49 суффиксов. Способ встраивания [р]: снапшот официального списка в репозитории (include_str!), парсинг при первом обращении (OnceLock); рост бинарника ~250–300 КБ — принято. Обновление — регенерацией снапшота скриптом в tools/ (частота — по мере выхода версий, деградации нет: старый список консервативен). Неизвестный TLD — по правилу PSL (неявная «*»): регистрируемый домен = последние две метки. Точный хост совпадает всегда.</td><td>Векторы: bank.co.il ≠ evil.co.il, userA.github.io ≠ userB.github.io, lk.domclick.ru = domclick.ru — тесты.</td></tr>
+<tr><td class="id">Б-2</td><td>IDN → punycode в normalize_host; в диалоге разрешения домен показывается и в punycode.</td><td>Омограф е/e не матчится как тот же сайт; тест.</td></tr>
+<tr><td class="id">Б-3a</td><td>DACL именованного канала — только текущий пользователь (+ SYSTEM): это и есть защита. Проверка PID клиента (GetNamedPipeClientProcessId → имя образа) — диагностика, а не граница защиты [р]: PID и путь образа пишутся в лог для разбора инцидентов; отклонять по имени образа нельзя (легальный путь установки произволен, имя подделывается). Б-3b (полная пара по секрету) — 0.14, отдельное ТЗ.</td><td>Чужой пользователь не подключается (DACL); каждое подключение отражается в логе с PID и образом, без секретов.</td></tr>
+<tr><td class="id">Б-4</td><td>Буфер очищается сразу при lock(), если там наш секрет; UI-копии секретов (Draft.password, строки палитры, undo-буфер, App.clipboard) — Zeroizing/зануление.</td><td>Тест: после блокировки буфер пуст; секреты не живут в куче после закрытия диалога.</td></tr>
+<tr><td class="id">Б-5</td><td>Индикатор стойкости мастер-пароля при создании и смене (биты + вердикт + предупреждение по словарю); минимум 8 символов сохраняется, жёсткого запрета нет.</td><td>Индикатор переиспользует password_entropy_bits; словарное предупреждение срабатывает на «password123».</td></tr>
+<tr><td class="id">Б-6</td><td>Пресеты Argon2 при создании/смене: «Стандарт» 64 МиБ/t3 (без изменений), «Усиленный» 128 МиБ/t4, «Максимальный» 256 МиБ/t4; параметры — в заголовке, апгрейд при смене пароля.</td><td>Старые файлы открываются; новые параметры пишутся и проверяются AAD; время разблокировки замерено и указано в подсказке.</td></tr>
+<tr><td class="id">Б-7</td><td>Hello: CheckAvailabilityAsync при включении опции; при недоступности — внятный отказ, опция не включается.</td><td>На машине без Hello кнопка сообщает причину и не создаёт сайдкар.</td></tr>
+</tbody></table>
+
+<h2>7. Технические требования и процесс (Т)</h2>
+<table>
+<tbody><tr><th>ID</th><th>Требование</th></tr>
+<tr><td class="id">Т-1</td><td>Разрезать main.rs (~194 КБ) на ui/ (unlock, list, card, status), dialogs/, settings.rs, state.rs; заменить россыпь Option на enum Screen. Поведение не меняется, тесты зелёные. Делается до UI-работ.</td></tr>
+<tr><td class="id">Т-2</td><td>CI GitHub Actions: job windows-latest (fmt, clippy -D warnings, test --workspace, cargo-audit) + job ubuntu [р] (test/clippy для vault-core, vault-cli, browser-host — они платформенно-независимы; vault-win проверяется кросс-таргетом x86_64-pc-windows-msvc без линковки). Release-workflow (по тегу v*) собирает dist + setup.exe артефактами (Inno Setup из choco).</td></tr>
+<tr><td class="id">Т-3</td><td>Golden-файлы хранилищ 0.12.x в тестах: открыть → прочитать → сохранить → открыть снова. «Без потерь» — по данным [р]: все записи и поля идентичны; побайтового равенства нет и не должно быть (schema 3 → 4, свежий nonce).</td></tr>
+<tr><td class="id">Т-4</td><td>tracing + лог без секретов (%APPDATA%\Hranitel\log.txt) вместо eprintln!. Ротация по размеру: 1 МБ, хранятся log.txt + log.1 + log.2 [р]. В лог — только уровни, действия, id записей, PID и имена образов [р]; названия записей и любые секреты не пишутся.</td></tr>
+<tr><td class="id">Т-5</td><td>Документация: новые разделы help.rs (F1), docs/usage.md, исправление README (трей уже есть), CHANGELOG.md, обновление docs/handoff.md.</td></tr>
+<tr><td class="id">Т-6</td><td>(Опционально) proptest для sites/quickadd, fuzz-таргеты import/codec/Header::decode.</td></tr>
+</tbody></table>
+
+<h2>8. Нефункциональные требования (Н)</h2>
+<ul>
+  <li>Разблокировка ≤ 0,5 с на стандартном пресете (эталонный ПК); усиленные пресеты — с предупреждением о времени.</li>
+  <li>1000 записей: поиск и отрисовка списка ≤ 50 мс; образец фразы не пересоздаётся каждый кадр (регресс 0.9.1 закрыт тестом).</li>
+  <li>Никаких сетевых вызовов; новые зависимости — только офлайн и лёгкие.</li>
+  <li>Секреты: не в логах, не в Debug, зануление при уничтожении.</li>
+  <li>Совместимость: FORMAT_VERSION = 1, schema 4, старые файлы без миграций.</li>
+</ul>
+
+<h2>9. Этапы и порядок сдачи</h2>
+<table>
+<tbody><tr><th>Этап</th><th>Состав</th><th>Результат</th><th>Оценка</th></tr>
+<tr><td class="id">0</td><td>Т-1, Т-2, Т-3</td><td>0.13.0-alpha, поведение не изменилось</td><td>2–3 дня</td></tr>
+<tr><td class="id">1</td><td>Б-1…Б-7, Ф-5, Ф-6</td><td>0.13.0-beta: безопасность + копии</td><td>4–6 дней</td></tr>
+<tr><td class="id">2</td><td>И-1…И-4, И-6…И-10, Ф-1</td><td>beta: интерфейс по макету A</td><td>5–8 дней</td></tr>
+<tr><td class="id">3</td><td>Ф-2, Ф-3, Ф-4, И-5, Т-4, Т-5</td><td><b>0.13.0</b>: история, аудит+, релиз</td><td>3–5 дней</td></tr>
+</tbody></table>
+<p>Итого ориентировочно <b>14–22 человеко-дня</b>. Каждый этап — отдельные коммиты с русскими сообщениями, прогон fmt/clippy/test, демонстрация по чек-листу на живом окне.</p>
+
+<h2>10. Тестирование и приёмка</h2>
+<ul>
+  <li>Автотесты: текущие 124 + ~30 новых (PSL/IDN-векторы, история ≤5 и восстановление, undo-идентичность, .bak, стойкость мастер-пароля, аудит-эвристики, буфер при блокировке, golden-совместимость). Цель — ≥150, все зелёные; на Linux — весь workspace кроме vault-win, vault-win — кросс-таргетом.</li>
+  <li>Ручной чек-лист (добавить к существующему): чипсы и счётчики, badge в списке, TOTP-кольцо, история и восстановление, undo, напоминание при входе, .bak и ручная копия, пресеты Argon2, Hello на машине без Hello, punycode в диалоге, размер/позиция окна.</li>
+  <li>Критерий приёмки релиза: clippy без предупреждений, все тесты зелёные, чек-лист пройден, старый файл 0.12.x открывается и сохраняется без потерь.</li>
+</ul>
+
+<h2>11. Риски</h2>
+<table>
+<tbody><tr><th>Риск</th><th>Митигация</th></tr>
+<tr><td>PSL меняет поведение матчинга у существующих записей</td><td>Точный хост совпадает всегда; векторы тестов; прогон на реальном хранилище.</td></tr>
+<tr><td>Старая версия приложения теряет новые поля при сохранении</td><td>Документация + рекомендация обновить все копии.</td></tr>
+<tr><td>Argon2 256 МиБ медленный на слабых ПК</td><td>Замер времени при выборе пресета, предупреждение.</td></tr>
+<tr><td>Регрессии при разрезании main.rs</td><td>Этап 0 отдельными коммитами, тесты до/после.</td></tr>
+<tr><td>Секреты в undo-буфере и истории</td><td>Zeroizing, зануление по таймауту и в Drop.</td></tr>
+<tr><td>Кастомные виджеты (кольцо TOTP) в egui 0.37</td><td>Отрисовка painter'ом, headless-тест кадра.</td></tr>
+<tr><td>Лок файла мешает CLI при открытом GUI (осознанное поведение модели KeePass) [р]</td><td>Внятное сообщение «хранилище открыто в приложении»; в документации указано, как работать с CLI при закрытом окне.</td></tr>
+<tr><td>Снапшот PSL устаревает между обновлениями [р]</td><td>Список консервативен; правило неизвестного TSL не зависит от свежести; обновление — одна команда в tools/.</td></tr>
+</tbody></table>
+
+<h2>12. Поставка</h2>
+<p>Версия 0.13.0 в workspace Cargo.toml → <code>scripts/package.ps1</code> → <code>dist\Hranitel-0.13.0-win64</code> (+zip) → <code>scripts/build-installer.ps1</code> → <code>Hranitel-0.13.0-setup.exe</code>. В комплекте: обновлённые README/docs, CHANGELOG, handoff.</p>
+
+<div class="note">Документ подготовлен по ревью репозитория reznikov73/POSPassword (0.12.3). Целевой макет — A «Эволюция текущего» (светлый). Ревизия от 18.11.2026: внесены правки технического ревью (честная формулировка Б-3а, модель блокировки Ф-6, связка И-7 с треем, способ встраивания PSL Б-1, доступность секрета TOTP И-4, пороги И-9, ubuntu-job Т-2, «по данным» Т-3, ротация Т-4, сброс undo при блокировке И-6). Статус: к реализации.</div>
+
+</div>
+
+</body></html>
