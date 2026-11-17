@@ -137,6 +137,9 @@ pub struct Vault {
     kdf: KdfParams,
     salt: [u8; SALT_LEN],
     data: VaultData,
+    /// Растёт при каждом изменении данных; интерфейс использует, чтобы
+    /// не пересчитывать аудит каждый кадр.
+    revision: u64,
     /// Блокировка от параллельной записи (Ф-6): живёт, пока открыто
     /// хранилище; в `save` писать можно, конкурентов быть не должно.
     lock: lock::FileLock,
@@ -176,6 +179,7 @@ impl Vault {
             kdf,
             salt,
             data: VaultData::default(),
+            revision: 0,
             lock,
         };
         vault.save()?;
@@ -232,6 +236,7 @@ impl Vault {
             kdf: header.kdf,
             salt: header.salt,
             data,
+            revision: 0,
             lock,
         })
     }
@@ -271,6 +276,7 @@ impl Vault {
         item.updated_at = item.created_at;
         let id = item.id;
         self.data.items.push(item);
+        self.revision += 1;
         self.save()?;
         Ok(id)
     }
@@ -288,6 +294,7 @@ impl Vault {
             item.updated_at = now;
             self.data.items.push(item);
         }
+        self.revision += 1;
         self.save()?;
         Ok(count)
     }
@@ -309,7 +316,27 @@ impl Vault {
         let old_updated = existing.updated_at;
         item.absorb_password_history(old_history, &old_password, old_updated);
         *existing = item;
+        self.revision += 1;
         self.save()
+    }
+
+    /// Возвращает удалённую запись без изменений id и дат (для «Вернуть»).
+    /// В отличие от `add`, дата создания не перезаписывается.
+    pub fn restore(&mut self, item: Item) -> Result<()> {
+        if self.data.items.iter().any(|i| i.id == item.id) {
+            return Err(Error::InvalidFormat(format!(
+                "запись {} уже существует",
+                item.id
+            )));
+        }
+        self.data.items.push(item);
+        self.revision += 1;
+        self.save()
+    }
+
+    /// Номер ревизии данных: растёт при каждом изменении.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn remove(&mut self, id: Uuid) -> Result<()> {
@@ -318,6 +345,7 @@ impl Vault {
         if self.data.items.len() == before {
             return Err(Error::ItemNotFound(id.to_string()));
         }
+        self.revision += 1;
         self.save()
     }
 
@@ -335,6 +363,7 @@ impl Vault {
             }
         }
         if count > 0 {
+            self.revision += 1;
             self.save()?;
         }
         Ok(count)

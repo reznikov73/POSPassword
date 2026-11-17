@@ -29,12 +29,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use uuid::Uuid;
-use vault_core::{
-    ExportFormat, ImportFormat, Item, ItemKind, MatchStrength, PassphraseOptions, Separator, Totp,
-    Vault, Wordlist, auto_description, expiries, generate_passphrase, generate_password,
-    generate_wrapping_key, import_file, now_secs, parse_credentials, passphrase_entropy_bits,
-    password_entropy_bits, sidecar_path,
-};
+// Глоб-импорт: всё ядро доступно модулям приложения через `use crate::*`.
+use vault_core::*;
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) use settings::*;
@@ -75,12 +71,23 @@ fn main() -> eframe::Result {
         std::process::exit(0);
     }
 
+    // Геометрия окна из настроек (И-7): размер и позиция прошлого запуска.
+    // Позиция за пределами экрана поправится после первого кадра — тут
+    // размер монитора ещё неизвестен.
+    let settings = load_settings();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_min_inner_size([760.0, 520.0])
+        .with_visible(!start_hidden)
+        .with_title(format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION")));
+    viewport = match settings.size {
+        Some([w, h]) => viewport.with_inner_size([w.max(760.0), h.max(520.0)]),
+        None => viewport.with_inner_size([1020.0, 680.0]),
+    };
+    if let Some([x, y]) = settings.pos {
+        viewport = viewport.with_position(egui::Pos2::new(x, y));
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1020.0, 680.0])
-            .with_min_inner_size([760.0, 520.0])
-            .with_visible(!start_hidden)
-            .with_title(format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION"))),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -116,6 +123,7 @@ impl eframe::App for App {
         self.remember_target_window();
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
+        self.track_window_geometry(ui.ctx());
 
         // Запросы расширения браузера: разбор и диалоги поверх остального.
         self.poll_browser_jobs(ui.ctx());

@@ -21,6 +21,10 @@ pub(crate) struct Settings {
     pub(crate) tray: bool,
     /// Запуск при входе в Windows (свёрнутым в трей).
     pub(crate) autostart: bool,
+    /// Размер окна (И-7): пишется только из нормального видимого состояния.
+    pub(crate) size: Option<[f32; 2]>,
+    /// Позиция окна (И-7).
+    pub(crate) pos: Option<[f32; 2]>,
 }
 
 pub(crate) fn load_settings() -> Settings {
@@ -32,6 +36,8 @@ pub(crate) fn load_settings() -> Settings {
         browser: true,
         tray: true,
         autostart: false,
+        size: None,
+        pos: None,
     };
     let Ok(text) = std::fs::read_to_string(settings_path()) else {
         return settings;
@@ -75,6 +81,12 @@ pub(crate) fn load_settings() -> Settings {
             "autostart" => {
                 settings.autostart = value.trim() == "on";
             }
+            "size" => {
+                settings.size = parse_geometry_pair(value);
+            }
+            "pos" => {
+                settings.pos = parse_geometry_pair(value);
+            }
             "path" => {
                 let path = value.trim();
                 if !path.is_empty() {
@@ -104,6 +116,14 @@ pub(crate) fn save_settings(settings: &Settings) {
         settings.hotkey.label().to_lowercase(),
         settings.quick_hotkey.label().to_lowercase()
     );
+    // Геометрия окна (И-7): только из нормального состояния — скрытое
+    // в трей окно живёт за экраном и развёрнутое не перезаписывает значения.
+    if let Some([w, h]) = settings.size {
+        text.push_str(&format!("size={w:.0}x{h:.0}\n"));
+    }
+    if let Some([x, y]) = settings.pos {
+        text.push_str(&format!("pos={x:.0},{y:.0}\n"));
+    }
     // Последний открытый файл: при следующем запуске поле уже заполнено.
     if let Some(path) = settings.vault_path.as_deref() {
         let path = path.trim();
@@ -131,4 +151,29 @@ pub(crate) fn app_dir() -> PathBuf {
 
 pub(crate) fn default_vault_path() -> String {
     app_dir().join("vault.opvault").display().to_string()
+}
+
+/// Разбирает пару чисел из настроек: `1020x680` или `12,34`.
+fn parse_geometry_pair(value: &str) -> Option<[f32; 2]> {
+    let (left, right) = value.trim().split_once(['x', ','])?;
+    let first: f32 = left.trim().parse().ok()?;
+    let second: f32 = right.trim().parse().ok()?;
+    if first.is_finite() && second.is_finite() {
+        Some([first, second])
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geometry_pair_roundtrip() {
+        assert_eq!(parse_geometry_pair("1020x680"), Some([1020.0, 680.0]));
+        assert_eq!(parse_geometry_pair("12,34"), Some([12.0, 34.0]));
+        assert_eq!(parse_geometry_pair("мусор"), None);
+        assert_eq!(parse_geometry_pair("12x"), None);
+    }
 }

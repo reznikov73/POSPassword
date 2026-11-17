@@ -109,6 +109,30 @@ fn read_wide(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..end])
 }
 
+/// Диалог сохранения резервной копии хранилища (Ф-5): фильтр .opvault.
+pub fn save_vault_copy(suggested: &str) -> Option<PathBuf> {
+    let mut buffer = [0u16; 1024];
+    for (index, unit) in suggested.encode_utf16().take(buffer.len() - 1).enumerate() {
+        buffer[index] = unit;
+    }
+
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        lpstrFilter: w!("Хранилище (*.opvault)\0*.opvault\0Все файлы\0*.*\0\0"),
+        lpstrTitle: w!("Куда сохранить резервную копию"),
+        Flags: OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+
+    // SAFETY: буфер и структура живут до конца вызова.
+    let chosen = unsafe { GetSaveFileNameW(&mut dialog) };
+    if !chosen.as_bool() {
+        return None;
+    }
+    Some(PathBuf::from(read_wide(&buffer)))
+}
 #[cfg(test)]
 mod tests {
     use super::read_wide;

@@ -38,10 +38,12 @@ pub(crate) enum KindGroup {
     Notes,
     Documents,
     Keys,
+    /// Только избранное (Ф-1): звезда у записи.
+    Favorite,
 }
 
 impl KindGroup {
-    pub(crate) fn all() -> [KindGroup; 7] {
+    pub(crate) fn all() -> [KindGroup; 8] {
         [
             KindGroup::All,
             KindGroup::Logins,
@@ -50,6 +52,7 @@ impl KindGroup {
             KindGroup::Notes,
             KindGroup::Documents,
             KindGroup::Keys,
+            KindGroup::Favorite,
         ]
     }
 
@@ -62,11 +65,20 @@ impl KindGroup {
             KindGroup::Notes => "Заметки",
             KindGroup::Documents => "Документы",
             KindGroup::Keys => "Ключи",
+            KindGroup::Favorite => "★ Избранное",
         }
     }
 
     pub(crate) fn matches(self, kind: ItemKind) -> bool {
         self == KindGroup::All || group_of(kind) == self
+    }
+
+    /// Подходит ли запись под фильтр целиком (для избранного нужен флаг).
+    pub(crate) fn matches_item(self, item: &Item) -> bool {
+        match self {
+            KindGroup::Favorite => item.favorite,
+            other => other.matches(item.kind),
+        }
     }
 }
 
@@ -498,6 +510,18 @@ pub(crate) struct App {
     pub(crate) export_result: Option<String>,
     /// Панель аудита хранилища.
     pub(crate) audit_open: bool,
+    /// Кэш счётчика аудита: ревизия данных и число находок (И-1).
+    pub(crate) audit_count: Option<(u64, usize)>,
+    /// Удалённая запись и момент удаления — «Вернуть» в течение 10 с (И-6).
+    /// Drop записи зануляет секреты.
+    pub(crate) undo: Option<(Item, Instant)>,
+    /// Напоминание об истекающих сроках после разблокировки (И-9).
+    pub(crate) reminder: Option<(usize, Instant)>,
+    /// Геометрия окна: последняя известная (для записи в настройки, И-7).
+    pub(crate) window_size: Option<[f32; 2]>,
+    pub(crate) window_pos: Option<[f32; 2]>,
+    /// Проверено ли, что окно после запуска попадает на экран (И-7).
+    pub(crate) geometry_checked: bool,
     /// Сочетание клавиш автоввода.
     pub(crate) hotkey: autotype::Hotkey,
     /// Сочетание клавиш быстрого доступа.
@@ -636,6 +660,12 @@ impl App {
             export_password: String::new(),
             export_result: None,
             audit_open: false,
+            audit_count: None,
+            undo: None,
+            reminder: None,
+            window_size: None,
+            window_pos: None,
+            geometry_checked: false,
             autotype_countdown: None,
             autotype_notice: None,
             hotkey,
@@ -681,6 +711,8 @@ impl App {
             browser: self.browser_enabled,
             tray: self.hide_to_tray,
             autostart: self.autostart,
+            size: self.window_size,
+            pos: self.window_pos,
         }
     }
 
@@ -814,6 +846,9 @@ impl App {
         drop(old_screen);
         self.draft = None;
         self.confirm_delete = None;
+        self.undo = None;
+        self.reminder = None;
+        self.audit_count = None;
         self.error = None;
         self.status = reason.to_string();
         self.import_open = false;
@@ -960,6 +995,13 @@ impl App {
                 };
                 self.last_activity = Instant::now();
                 self.error = None;
+                // Напоминание об истекающих сроках — один раз за разблокировку.
+                if let Some(vault) = self.screen.vault() {
+                    let count = expiring_soon(vault);
+                    if count > 0 {
+                        self.reminder = Some((count, Instant::now()));
+                    }
+                }
                 // Пока хранилище было закрыто, браузер или палитра могли
                 // попросить запись — теперь можно ответить.
                 if let Some((request, reply)) = self.pending_browser.take() {
@@ -1050,6 +1092,60 @@ impl App {
         let vault = self.screen.vault()?;
         let item = vault.get(self.screen.selected()?)?;
         Some(item.title.clone())
+    }
+
+    /// Запоминает геометрию окна (И-7): только нормальное видимое
+    /// состояние. Скрытое в трей окно (позиция −32000) и развёрнутое на
+    /// весь экран не перезаписывают сохранённые значения — иначе после
+    /// «свернуть в трей → выйти» окно рождалось бы за экраном.
+    pub(crate) fn track_window_geometry(&mut self, ctx: &egui::Context) {
+        let info = ctx.input(|input| input.viewport().clone());
+        let Some(outer) = info.outer_rect else {
+            return;
+        };
+        let hidden = outer.min.x < -10_000.0 || outer.min.y < -10_000.0;
+        let maximized = info.maximized.unwrap_or(false);
+        let minimized = info.minimized.unwrap_or(false);
+        if !hidden && !maximized && !minimized {
+            self.window_size = Some([outer.width(), outer.height()]);
+            self.window_pos = Some([outer.min.x, outer.min.y]);
+        }
+
+        // Раз после запуска окно оказалось за пределами экрана — вернуть
+        // его на видимое место (мониторы могли поменяться).
+        if !self.geometry_checked {
+            self.geometry_checked = true;
+            let Some(monitor) = info.monitor_size else {
+                return;
+            };
+            if outer.min.x + 60.0 > monitor.x
+                || outer.min.y + 60.0 > monitor.y
+                || outer.min.x < -60.0
+                || outer.min.y < -60.0
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
+                    40.0, 40.0,
+                )));
+                self.window_pos = Some([40.0, 40.0]);
+            }
+        }
+    }
+
+    /// Готовит напоминание об истекающих сроках (И-9): показывается один
+    /// раз после разблокировки, если есть записи с истекающим ≤30 дн или
+    /// просроченным сроком. Порог мягче аудита (90 дн): о ближней границе
+    /// сообщаем лично, дальнюю видит открывший аудит.
+    /// Число находок аудита с кэшем по ревизии данных (И-1).
+    pub(crate) fn audit_total(&mut self, vault: &Vault) -> usize {
+        let revision = vault.revision();
+        if let Some((cached_rev, count)) = self.audit_count
+            && cached_rev == revision
+        {
+            return count;
+        }
+        let count = vault.audit().total();
+        self.audit_count = Some((revision, count));
+        count
     }
 
     /// Запускает фоновую проверку доступности Windows Hello (Б-7).
@@ -1147,6 +1243,13 @@ impl App {
                 self.error = None;
                 self.last_activity = Instant::now();
                 self.status = "Хранилище открыто через Windows Hello.".to_string();
+                // Напоминание — и для входа через Hello (И-9).
+                if let Some(vault) = self.screen.vault() {
+                    let count = expiring_soon(vault);
+                    if count > 0 {
+                        self.reminder = Some((count, Instant::now()));
+                    }
+                }
                 // Отложенные запросы браузера и палитры теперь можно выполнить.
                 if let Some((request, reply)) = self.pending_browser.take() {
                     self.handle_browser(request, reply);
@@ -1184,6 +1287,13 @@ impl App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Геометрия окна — в настройки при выходе (И-7).
+        save_settings(&self.settings_snapshot());
+    }
+}
+
 /// Образец фразы устарел, если он составлен для другого языка.
 /// После `regenerate()` отметка совпадает с языком, и образец не пересоздаётся.
 /// Сравнивать сам текст нельзя: проверка «ascii или нет» всегда была истинной,
@@ -1194,4 +1304,19 @@ pub(crate) fn phrase_sample_stale(
     language: Wordlist,
 ) -> bool {
     mode == GenMode::Phrase && sample_lang != Some(language)
+}
+
+/// Число записей с истекающим ≤30 дн или просроченным сроком (И-9).
+/// Автономная функция: вызывается при живом заёме хранилища.
+pub(crate) fn expiring_soon(vault: &Vault) -> usize {
+    let now = now_secs() as i64;
+    let mut count = 0usize;
+    for item in vault.items() {
+        for expiry in expiries(item, now) {
+            if expiry.days_left <= 30 {
+                count += 1;
+            }
+        }
+    }
+    count
 }
