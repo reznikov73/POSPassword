@@ -27,10 +27,15 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Hranitel\app
+DefaultDirName={autopf}\Hranitel
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
+; Можно выбрать «только для меня» — тогда без UAC и в профиль (ключ/команда:
+; /CURRENTUSER). По умолчанию — установка для всех, в Program Files.
+PrivilegesRequiredOverridesAllowed=dialog commandline
+ArchitecturesInstallIn64BitMode=x64compatible
+UsedUserAreasWarning=no
 OutputDir=..\dist
 OutputBaseFilename=Hranitel-{#MyAppVersion}-setup
 SetupIconFile=hranitel.ico
@@ -61,4 +66,6 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Hranitel"; ValueData: """{app}\{#MyAppExeName}"" --tray --quiet"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Запустить «Хранитель»"; Flags: nowait postinstall skipifsilent
+; При установке с правами администратора программу надо запускать от
+; обычного пользователя, иначе она стартует повышенной.
+Filename: "{app}\{#MyAppExeName}"; Description: "Запустить «Хранитель»"; Flags: nowait postinstall skipifsilent runasoriginaluser

@@ -347,10 +347,14 @@ Field { label: String, value: String, sensitive: bool }
 
 ### 0.12.2: установщик setup.exe и честная галочка автозапуска
 
-- `installer/hranitel.iss` (Inno Setup 6): установка в `%LOCALAPPDATA%\Hranitel\app`
-  без прав администратора, ярлыки в «Пуск» и (по галочке) на рабочем столе,
-  задача `autostart` пишет `HKCU\…\Run` со `--tray --quiet` и удаляет значение
-  при деинсталляции. Настройки и хранилище при удалении не трогаются.
+- `installer/hranitel.iss` (Inno Setup 6): установка по умолчанию в
+  **`{autopf}\Hranitel`** (Program Files, нужен UAC), режим администратора;
+  `PrivilegesRequiredOverridesAllowed=dialog commandline` — можно выбрать
+  «только для меня» (`/CURRENTUSER`), тогда в профиль без UAC. Ярлыки в «Пуск»
+  и (по галочке) на рабочем столе, задача `autostart` пишет `HKCU\…\Run`
+  со `--tray --quiet` и снимает значение при удалении. Запуск после установки —
+  `runasoriginaluser`, чтобы программа не стартовала повышенной. Настройки и
+  хранилище при удалении не трогаются.
 - Сборка: `scripts/build-installer.ps1` (пакет → iscc `/DMyAppVersion=…`),
   иконка `installer/hranitel.ico` сделана из `extension/icons/128.png`.
 - Галочка «Запускать при входе в Windows» теперь читает ключ Run
