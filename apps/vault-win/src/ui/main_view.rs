@@ -1048,6 +1048,42 @@ impl App {
                         }
                     });
 
+                // История пароля (И-5): раскрываемый блок, восстановление.
+                if !item.password_history.is_empty() {
+                    ui.add_space(8.0);
+                    let header = format!("История пароля: {} верс", item.password_history.len());
+                    egui::CollapsingHeader::new(header)
+                        .default_open(false)
+                        .id_salt("password_history")
+                        .show(ui, |ui| {
+                            for (index, version) in item.password_history.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(date_ymd(version.changed_at))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    ui.monospace("•".repeat(version.value.chars().count().min(14)));
+                                    if ui.small_button("⧉").clicked() {
+                                        intents.copy_field = Some((
+                                            "Прежний пароль".to_string(),
+                                            version.value.clone(),
+                                        ));
+                                    }
+                                    if ui
+                                        .small_button("Сделать текущим")
+                                        .on_hover_text(
+                                            "Вернуть этот пароль; нынешний уйдёт в историю",
+                                        )
+                                        .clicked()
+                                    {
+                                        intents.restore_version = Some((item.id, index));
+                                    }
+                                });
+                            }
+                        });
+                }
+
                 ui.add_space(12.0);
                 ui.label("Заметки");
                 if item.notes.is_empty() {
@@ -1158,6 +1194,7 @@ struct CardIntents {
     copy_totp: Option<String>,
     copy_url: Option<String>,
     copy_field: Option<(String, String)>,
+    restore_version: Option<(Uuid, usize)>,
 }
 
 impl CardIntents {
@@ -1191,6 +1228,12 @@ impl CardIntents {
         }
         if let Some((label, value)) = self.copy_field {
             app.copy(&value, &label);
+        }
+        if let Some((id, index)) = self.restore_version {
+            match vault.restore_password_version(id, index) {
+                Ok(()) => app.status = "Прежний пароль снова текущий.".to_string(),
+                Err(err) => app.status = format!("Не удалось вернуть пароль: {err}"),
+            }
         }
     }
 }

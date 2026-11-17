@@ -320,6 +320,43 @@ impl Vault {
         self.save()
     }
 
+    /// Возвращает версию из истории паролей текущей записью (И-5):
+    /// выбранная версия становится паролем, прежний текущий уходит в
+    /// историю. Отдельный метод, а не `update`: там история собирается
+    /// по сравнению паролей, а здесь она уже перестроена.
+    pub fn restore_password_version(&mut self, id: Uuid, index: usize) -> Result<()> {
+        let item = self
+            .data
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| Error::ItemNotFound(id.to_string()))?;
+        item.restore_password_version(index)?;
+        item.touch();
+        self.revision += 1;
+        self.save()
+    }
+
+    /// Проверяет мастер-пароль открытого хранилища без обращения к файлу
+    /// (сверкой выведенного ключа). Нужен диалогу смены пароля: повторное
+    /// `open` теперь упирается в собственную блокировку (Ф-6).
+    pub fn verify_password(&self, password: &str) -> bool {
+        match crypto::derive_key(password.as_bytes(), &self.salt, self.kdf) {
+            Ok(key) => key[..] == self.key[..],
+            Err(_) => false,
+        }
+    }
+
+    /// Замер времени вывода ключа на этом компьютере (Б-6): подсказка
+    /// рядом с выбором пресета. Пароль и соль — случайные, результат
+    /// никуда не идёт.
+    pub fn measure_kdf(params: KdfParams) -> std::time::Duration {
+        let salt = [7u8; SALT_LEN];
+        let started = std::time::Instant::now();
+        let _ = crypto::derive_key(b"measure", &salt, params);
+        started.elapsed()
+    }
+
     /// Возвращает удалённую запись без изменений id и дат (для «Вернуть»).
     /// В отличие от `add`, дата создания не перезаписывается.
     pub fn restore(&mut self, item: Item) -> Result<()> {

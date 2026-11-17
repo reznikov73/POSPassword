@@ -49,13 +49,15 @@ impl App {
         }
 
         // Навигация клавишами работает и в поле фильтра, и просто в окне.
+        // Ctrl+T — код TOTP выбранной записи (Ф-4).
         let mut commit = None;
-        let (go_up, go_down, enter, copy_password) = ctx.input_mut(|input| {
+        let (go_up, go_down, enter, copy_password, copy_totp) = ctx.input_mut(|input| {
             (
                 input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
                 input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
                 input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
                 input.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::T),
             )
         });
         if enter {
@@ -136,7 +138,7 @@ impl App {
                 );
                 ui.label(
                     egui::RichText::new(
-                        "Enter — ввести · Ctrl+C — копировать пароль · Esc — закрыть",
+                        "Enter — ввести · Ctrl+C — пароль · Ctrl+T — код · Esc — закрыть",
                     )
                     .small()
                     .weak(),
@@ -149,10 +151,39 @@ impl App {
 
         // Действие по выбранной строке: копия пароля или автоввод в окно.
         let Some(idx) = commit else {
+            // Курсор и дескриптор читаем заранее: дальше идёт заём self.
+            let cursor = quick.cursor;
+            let target_hwnd = quick.target_hwnd;
+            if copy_totp && !rows.is_empty() {
+                // Код TOTP выбранной записи (Ф-4): буфер очистится через
+                // 30 секунд, как и любой секрет.
+                let id = rows[cursor].0;
+                let title = rows[cursor].1.clone();
+                if let Some(item) = vault.get(id) {
+                    let code = item.fields.iter().find(|field| {
+                        field.label.to_ascii_lowercase().contains("totp")
+                            || field
+                                .value
+                                .trim()
+                                .to_ascii_lowercase()
+                                .starts_with("otpauth://")
+                    });
+                    match code.and_then(|field| Totp::parse(&field.value).ok()) {
+                        Some(totp) => {
+                            let code = totp.code_at(now_secs());
+                            self.copy(&code, "Код TOTP");
+                            self.quick_access = None;
+                        }
+                        None => {
+                            self.status = format!("У записи «{title}» нет одноразового кода.");
+                        }
+                    }
+                }
+            }
             if copy_password && !rows.is_empty() {
-                let idx = quick.cursor;
-                let target_hwnd = quick.target_hwnd;
+                let idx = cursor;
                 let (_, title, username, _, _) = &rows[idx];
+                let _ = target_hwnd;
                 if let Some(item) = vault.get(rows[idx].0) {
                     let password = item.password.clone();
                     if password.is_empty() {

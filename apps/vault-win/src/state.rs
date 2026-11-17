@@ -522,6 +522,12 @@ pub(crate) struct App {
     pub(crate) window_pos: Option<[f32; 2]>,
     /// Проверено ли, что окно после запуска попадает на экран (И-7).
     pub(crate) geometry_checked: bool,
+    /// Выбранный пресет Argon2 при создании и смене мастер-пароля (Б-6).
+    pub(crate) unlock_preset: KdfPreset,
+    /// Замер разблокировки: (пресет, миллисекунды) — подсказка выбора (Б-6).
+    pub(crate) kdf_estimate: Option<(KdfPreset, u64)>,
+    /// Идёт фоновый замер пресета (Б-6).
+    pub(crate) kdf_measuring: Option<Receiver<(KdfPreset, u64)>>,
     /// Сочетание клавиш автоввода.
     pub(crate) hotkey: autotype::Hotkey,
     /// Сочетание клавиш быстрого доступа.
@@ -666,6 +672,9 @@ impl App {
             window_size: None,
             window_pos: None,
             geometry_checked: false,
+            unlock_preset: KdfPreset::Standard,
+            kdf_estimate: None,
+            kdf_measuring: None,
             autotype_countdown: None,
             autotype_notice: None,
             hotkey,
@@ -970,7 +979,7 @@ impl App {
                     self.error = Some("Пароли не совпадают.".into());
                     return;
                 }
-                Vault::create(&path, &password)
+                Vault::create_with_preset(&path, &password, self.unlock_preset)
             }
         };
 
@@ -1158,6 +1167,71 @@ impl App {
             let result = hello_win::check_availability();
             let _ = sender.send(result);
         });
+    }
+
+    /// Индикатор стойкости мастер-пароля (Б-5): биты, вердикт и словарное
+    /// предупреждение. Минимум 8 символов остаётся мягким требованием.
+    pub(crate) fn master_password_strength(&mut self, ui: &mut egui::Ui, bits: f64, common: bool) {
+        ui.add_space(6.0);
+        strength_scale(ui, bits);
+        ui.label(
+            egui::RichText::new(format!("≈ {bits:.0} бит · {}", strength_word(bits)))
+                .small()
+                .color(strength_color(bits)),
+        );
+        if common {
+            ui.colored_label(
+                AMBER,
+                "Этот пароль входит в топ-10 000 употребимых — придумайте другой.",
+            );
+        }
+    }
+
+    /// Подсказка с замером времени разблокировки для выбранного пресета (Б-6).
+    pub(crate) fn kdf_measure_hint(&mut self, ui: &mut egui::Ui) {
+        let text = if self.kdf_measuring.is_some() {
+            "Замер…".to_string()
+        } else if let Some((preset, millis)) = self.kdf_estimate
+            && preset == self.unlock_preset
+        {
+            if millis < 1000 {
+                format!("≈ {millis} мс на этом компьютере")
+            } else {
+                format!("≈ {:.1} с на этом компьютере", millis as f64 / 1000.0)
+            }
+        } else {
+            String::new()
+        };
+        if !text.is_empty() {
+            ui.label(egui::RichText::new(text).weak().small());
+        } else {
+            ui.ctx().request_repaint_after(Duration::from_millis(300));
+        }
+    }
+
+    /// Запускает фоновый замер времени разблокировки для пресета (Б-6):
+    /// Argon2 с 256 МиБ может занимать секунды — UI не должен висеть.
+    pub(crate) fn start_kdf_measure(&mut self, preset: KdfPreset) {
+        if self.kdf_measuring.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.kdf_measuring = Some(receiver);
+        std::thread::spawn(move || {
+            let millis = Vault::measure_kdf(preset.params()).as_millis() as u64;
+            let _ = sender.send((preset, millis));
+        });
+    }
+
+    /// Забирает результат фонового замера (вызывается каждый кадр).
+    pub(crate) fn poll_kdf_measure(&mut self) {
+        let Some(receiver) = &self.kdf_measuring else {
+            return;
+        };
+        if let Ok((preset, millis)) = receiver.try_recv() {
+            self.kdf_measuring = None;
+            self.kdf_estimate = Some((preset, millis));
+        }
     }
 
     /// Разбирает результат проверки: доступен — включает опцию (создаёт

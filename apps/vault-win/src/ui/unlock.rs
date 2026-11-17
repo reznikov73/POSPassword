@@ -46,6 +46,41 @@ impl App {
                             .password(true)
                             .desired_width(f32::INFINITY),
                     );
+
+                    // Индикатор стойкости мастер-пароля (Б-5): сначала
+                    // считаем, потом рисуем — без двойного заёма self.
+                    let strength = self
+                        .screen
+                        .unlock_password_mut()
+                        .map(|password| (password_entropy_bits(password), is_common_password(password)));
+                    if let Some((bits, common)) = strength {
+                        self.master_password_strength(ui, bits, common);
+                    }
+
+                    // Пресет защиты от перебора (Б-6).
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Защита от перебора:");
+                        egui::ComboBox::from_id_salt("kdf_preset_create")
+                            .selected_text(self.unlock_preset.label())
+                            .show_ui(ui, |ui| {
+                                for preset in [
+                                    KdfPreset::Standard,
+                                    KdfPreset::Hardened,
+                                    KdfPreset::Maximum,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.unlock_preset,
+                                        preset,
+                                        preset.label(),
+                                    );
+                                }
+                            });
+                        if ui.small_button("Замерить").clicked() {
+                            self.start_kdf_measure(self.unlock_preset);
+                        }
+                    });
+                    self.kdf_measure_hint(ui);
                 }
 
                 ui.add_space(12.0);

@@ -41,6 +41,53 @@ impl App {
                         .desired_width(f32::INFINITY),
                 );
 
+                // Индикатор стойкости нового пароля (Б-5): биты, вердикт
+                // и предупреждение по словарю употребимых паролей.
+                if !self.password_new.is_empty() {
+                    ui.add_space(6.0);
+                    let bits = password_entropy_bits(&self.password_new);
+                    strength_scale(ui, bits);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "≈ {bits:.0} бит · {}",
+                            strength_word(bits)
+                        ))
+                        .small()
+                        .color(strength_color(bits)),
+                    );
+                    if is_common_password(&self.password_new) {
+                        ui.colored_label(
+                            AMBER,
+                            "Этот пароль входит в топ-10 000 употребимых — придумайте другой.",
+                        );
+                    }
+                }
+
+                // Пресет стойкости Argon2 (Б-6): параметры защиты от перебора.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Защита от перебора:");
+                    egui::ComboBox::from_id_salt("kdf_preset_change")
+                        .selected_text(self.unlock_preset.label())
+                        .show_ui(ui, |ui| {
+                            for preset in [
+                                KdfPreset::Standard,
+                                KdfPreset::Hardened,
+                                KdfPreset::Maximum,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.unlock_preset,
+                                    preset,
+                                    preset.label(),
+                                );
+                            }
+                        });
+                    if ui.small_button("Замерить").clicked() {
+                        self.start_kdf_measure(self.unlock_preset);
+                    }
+                });
+                self.kdf_measure_hint(ui);
+
                 if let Some(error) = &self.password_error {
                     ui.add_space(6.0);
                     ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
@@ -80,25 +127,25 @@ impl App {
             } else if self.password_new.chars().count() < 8 {
                 self.password_error = Some("Новый пароль короче 8 символов.".into());
             } else {
-                // Текущий пароль проверяем настоящей расшифровкой файла.
-                match Vault::open(vault.path(), &self.password_current) {
-                    Err(_) => {
-                        self.password_error = Some("Текущий пароль неверен.".into());
-                    }
-                    Ok(probe) => {
-                        drop(probe);
-                        match vault.change_password(&self.password_new) {
-                            Ok(()) => {
-                                self.status = "Мастер-пароль изменён. Вход через Windows Hello отключён — включите заново.".to_string();
-                                self.password_open = false;
-                                self.password_current.zeroize();
-                                self.password_new.zeroize();
-                                self.password_confirm.zeroize();
-                            }
-                            Err(err) => {
-                                self.password_error =
-                                    Some(format!("Не удалось сменить пароль: {err}"));
-                            }
+                // Текущий пароль сверяется по ключу открытого хранилища:
+                // повторное открытие файла упёрлось бы в собственную
+                // блокировку (Ф-6).
+                if !vault.verify_password(&self.password_current) {
+                    self.password_error = Some("Текущий пароль неверен.".into());
+                } else {
+                    match vault.change_password_with_preset(
+                        &self.password_new,
+                        self.unlock_preset.params(),
+                    ) {
+                        Ok(()) => {
+                            self.status = "Мастер-пароль изменён. Вход через Windows Hello отключён — включите заново.".to_string();
+                            self.password_open = false;
+                            self.password_current.zeroize();
+                            self.password_new.zeroize();
+                            self.password_confirm.zeroize();
+                        }
+                        Err(err) => {
+                            self.password_error = Some(format!("Не удалось сменить пароль: {err}"));
                         }
                     }
                 }

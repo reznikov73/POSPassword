@@ -28,7 +28,10 @@ mod sites;
 mod totp;
 mod vault;
 
-pub use audit::{AuditReport, Expiry, Finding, audit, expiries, is_expiry_label, parse_date};
+pub use audit::{
+    AuditReport, Expiry, Finding, audit, expiries, is_common_password, is_expiry_label,
+    parse_date,
+};
 pub use crypto::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 pub use describe::auto_description;
 pub use error::{Error, Result};

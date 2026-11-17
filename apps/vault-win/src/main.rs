@@ -124,6 +124,7 @@ impl eframe::App for App {
         self.tick(ui.ctx());
         self.track_activity(ui.ctx());
         self.track_window_geometry(ui.ctx());
+        self.poll_kdf_measure();
 
         // Запросы расширения браузера: разбор и диалоги поверх остального.
         self.poll_browser_jobs(ui.ctx());
