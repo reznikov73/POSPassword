@@ -237,8 +237,203 @@ pub(crate) enum BrowserOutcome {
     SaveAsNew,
 }
 
+/// Экран приложения: вход или работа с открытым хранилищем.
+/// Поля принадлежат только своему экрану — компилятор не даст прочитать
+/// мастер-пароль после разблокировки или список записей на экране входа.
+pub(crate) enum Screen {
+    Unlock {
+        mode: Mode,
+        password: String,
+        confirm: String,
+        /// Фоновый запрос Windows Hello; результат забирается в `tick`.
+        hello_pending: Option<Receiver<Result<Vault, String>>>,
+        /// Поставить курсор в поле мастер-пароля (браузер или трей просят доступ).
+        focus_password: bool,
+    },
+    Main {
+        /// `None` — только на мгновение внутри `main_ui` (шаблон take/put,
+        /// чтобы диалоги могли занимать и приложение, и хранилище).
+        vault: Option<Vault>,
+        selected: Option<Uuid>,
+        query: String,
+        kind_filter: KindGroup,
+        reveal_password: bool,
+    },
+}
+
+impl Screen {
+    /// Открыто ли хранилище (экран работы).
+    pub(crate) fn is_main(&self) -> bool {
+        matches!(self, Screen::Main { .. })
+    }
+
+    /// Хранилище по ссылке, если экран работы.
+    pub(crate) fn vault(&self) -> Option<&Vault> {
+        match self {
+            Screen::Main { vault, .. } => vault.as_ref(),
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    /// Забрать хранилище на время кадра (вернуть через `put_vault`).
+    pub(crate) fn take_vault(&mut self) -> Option<Vault> {
+        match self {
+            Screen::Main { vault, .. } => vault.take(),
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    /// Хранилище с правом изменения, если экран работы.
+    pub(crate) fn vault_mut(&mut self) -> Option<&mut Vault> {
+        match self {
+            Screen::Main { vault, .. } => vault.as_mut(),
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    /// Вернуть хранилище, взятое через `take_vault`.
+    pub(crate) fn put_vault(&mut self, back: Vault) {
+        if let Screen::Main { vault, .. } = self {
+            *vault = Some(back);
+        }
+    }
+
+    /// Выбранная запись (или `None` на экране входа).
+    pub(crate) fn selected(&self) -> Option<Uuid> {
+        match self {
+            Screen::Main { selected, .. } => *selected,
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    /// Выбранная запись с правом изменения (для диалогов аудита).
+    pub(crate) fn selected_mut(&mut self) -> Option<&mut Option<Uuid>> {
+        match self {
+            Screen::Main { selected, .. } => Some(selected),
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    pub(crate) fn set_selected(&mut self, id: Option<Uuid>) {
+        if let Screen::Main { selected, .. } = self {
+            *selected = id;
+        }
+    }
+
+    /// Поисковый запрос — только на экране работы.
+    pub(crate) fn query_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Screen::Main { query, .. } => Some(query),
+            Screen::Unlock { .. } => None,
+        }
+    }
+
+    /// Показаны ли скрытые значения (пароли) в карточке.
+    pub(crate) fn reveal_password(&self) -> bool {
+        match self {
+            Screen::Main {
+                reveal_password, ..
+            } => *reveal_password,
+            Screen::Unlock { .. } => false,
+        }
+    }
+
+    pub(crate) fn set_reveal_password(&mut self, on: bool) {
+        if let Screen::Main {
+            reveal_password, ..
+        } = self
+        {
+            *reveal_password = on;
+        }
+    }
+
+    /// Активная категория списка.
+    pub(crate) fn kind_filter(&self) -> KindGroup {
+        match self {
+            Screen::Main { kind_filter, .. } => *kind_filter,
+            Screen::Unlock { .. } => KindGroup::All,
+        }
+    }
+
+    pub(crate) fn set_kind_filter(&mut self, group: KindGroup) {
+        if let Screen::Main { kind_filter, .. } = self {
+            *kind_filter = group;
+        }
+    }
+
+    /// Мастер-пароль для поля ввода — только на экране входа.
+    pub(crate) fn unlock_password_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Screen::Unlock { password, .. } => Some(password),
+            Screen::Main { .. } => None,
+        }
+    }
+
+    /// Повтор пароля при создании — только на экране входа.
+    pub(crate) fn unlock_confirm_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Screen::Unlock { confirm, .. } => Some(confirm),
+            Screen::Main { .. } => None,
+        }
+    }
+
+    /// Режим экрана входа: открыть существующее или создать новое.
+    pub(crate) fn unlock_mode(&self) -> Option<Mode> {
+        match self {
+            Screen::Unlock { mode, .. } => Some(*mode),
+            Screen::Main { .. } => None,
+        }
+    }
+
+    pub(crate) fn set_unlock_mode(&mut self, mode: Mode) {
+        if let Screen::Unlock { mode: slot, .. } = self {
+            *slot = mode;
+        }
+    }
+
+    /// Запрос Windows Hello, ожидающий подтверждения.
+    pub(crate) fn take_hello_pending(&mut self) -> Option<Receiver<Result<Vault, String>>> {
+        match self {
+            Screen::Unlock { hello_pending, .. } => hello_pending.take(),
+            Screen::Main { .. } => None,
+        }
+    }
+
+    pub(crate) fn set_hello_pending(&mut self, rx: Option<Receiver<Result<Vault, String>>>) {
+        if let Screen::Unlock { hello_pending, .. } = self {
+            *hello_pending = rx;
+        }
+    }
+
+    pub(crate) fn hello_pending_is_some(&self) -> bool {
+        matches!(
+            self,
+            Screen::Unlock {
+                hello_pending: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Поставить курсор в поле мастер-пароля при следующем кадре.
+    pub(crate) fn set_focus_password(&mut self, on: bool) {
+        if let Screen::Unlock { focus_password, .. } = self {
+            *focus_password = on;
+        }
+    }
+
+    pub(crate) fn focus_password(&self) -> bool {
+        matches!(
+            self,
+            Screen::Unlock {
+                focus_password: true,
+                ..
+            }
+        )
+    }
+}
+
 pub(crate) struct App {
-    pub(crate) mode: Mode,
     pub(crate) path: String,
     /// Запуск с ключом --tray: окно спрятать после первого кадра.
     pub(crate) start_hidden: bool,
@@ -260,18 +455,12 @@ pub(crate) struct App {
     pub(crate) pending_browser: Option<(browser::BrowserRequest, Sender<String>)>,
     /// Запрос быстрого доступа, ждущий разблокировки.
     pub(crate) pending_quick: Option<autotype::QuickRequest>,
-    /// Поставить курсор в поле мастер-пароля (браузер или трей просят доступ).
-    pub(crate) focus_password: bool,
-    pub(crate) password: String,
-    pub(crate) confirm: String,
-    pub(crate) vault: Option<Vault>,
-    pub(crate) query: String,
-    pub(crate) selected: Option<Uuid>,
+    /// Экран: вход или работа с открытым хранилищем.
+    pub(crate) screen: Screen,
     pub(crate) draft: Option<Draft>,
     pub(crate) confirm_delete: Option<Uuid>,
     pub(crate) status: String,
     pub(crate) error: Option<String>,
-    pub(crate) reveal_password: bool,
     pub(crate) clipboard: Option<(Instant, String)>,
     pub(crate) last_activity: Instant,
     pub(crate) import_open: bool,
@@ -279,8 +468,6 @@ pub(crate) struct App {
     pub(crate) import_format: ImportFormat,
     pub(crate) import_result: Option<String>,
     pub(crate) theme: Theme,
-    /// Фоновый запрос Windows Hello; результат забирается в `tick`.
-    pub(crate) hello_pending: Option<Receiver<Result<Vault, String>>>,
     /// Окно встроенной справки, открывается по F1.
     pub(crate) help_open: bool,
     /// Курсор должен прыгнуть в поиск на следующем кадре (Ctrl+F).
@@ -323,8 +510,6 @@ pub(crate) struct App {
     pub(crate) autotype_countdown: Option<Instant>,
     /// Сообщение автоввода на несколько секунд поверх окна.
     pub(crate) autotype_notice: Option<(String, Instant)>,
-    /// Фильтр списка по категории.
-    pub(crate) kind_filter: KindGroup,
     /// Диалог генератора паролей.
     pub(crate) gen_open: bool,
     pub(crate) gen_mode: GenMode,
@@ -396,7 +581,6 @@ impl App {
             ));
         }
         Self {
-            mode: Mode::Open,
             path: startup_path,
             hide_to_tray,
             start_hidden,
@@ -408,17 +592,17 @@ impl App {
             last_target: None,
             pending_browser: None,
             pending_quick: None,
-            focus_password: false,
-            password: String::new(),
-            confirm: String::new(),
-            vault: None,
-            query: String::new(),
-            selected: None,
+            screen: Screen::Unlock {
+                mode: Mode::Open,
+                password: String::new(),
+                confirm: String::new(),
+                hello_pending: None,
+                focus_password: false,
+            },
             draft: None,
             confirm_delete: None,
             status,
             error: None,
-            reveal_password: false,
             clipboard: None,
             last_activity: Instant::now(),
             import_open: false,
@@ -426,7 +610,6 @@ impl App {
             import_format: ImportFormat::Auto,
             import_result: None,
             theme,
-            hello_pending: None,
             help_open: false,
             focus_search: false,
             password_open: false,
@@ -454,7 +637,6 @@ impl App {
             quick_capture: false,
             quick_access: None,
             quick_prefill: None,
-            kind_filter: KindGroup::All,
             gen_open: false,
             gen_mode: GenMode::Chars,
             gen_sample_lang: None,
@@ -527,7 +709,7 @@ impl App {
                 tray::TrayCommand::Open => self.show_main(ctx),
                 tray::TrayCommand::QuickAccess => {
                     self.show_main(ctx);
-                    if self.vault.is_some() {
+                    if self.screen.is_main() {
                         let (hwnd, title) = self.last_target.clone().unwrap_or((0, String::new()));
                         self.quick_access = Some(QuickAccess {
                             query: String::new(),
@@ -547,13 +729,13 @@ impl App {
                                 .map(|(hwnd, _)| *hwnd)
                                 .unwrap_or(0),
                         });
-                        self.focus_password = true;
+                        self.screen.set_focus_password(true);
                         self.status =
                             "Быстрый доступ: сначала разблокируйте хранилище.".to_string();
                     }
                 }
                 tray::TrayCommand::Lock => {
-                    if self.vault.is_some() {
+                    if self.screen.is_main() {
                         self.lock("Заблокировано из трея.");
                     }
                     self.show_main(ctx);
@@ -589,20 +771,32 @@ impl App {
             ));
         }
         self.pending_quick = None;
-        self.vault = None;
+        // Экран работы целиком заменяется экраном входа: хранилище,
+        // выбор, поиск и показанные пароли уничтожаются вместе с ним.
+        let mut old_screen = std::mem::replace(
+            &mut self.screen,
+            Screen::Unlock {
+                mode: Mode::Open,
+                password: String::new(),
+                confirm: String::new(),
+                hello_pending: None,
+                focus_password: false,
+            },
+        );
+        if let Screen::Unlock {
+            password, confirm, ..
+        } = &mut old_screen
+        {
+            password.zeroize();
+            confirm.zeroize();
+        }
+        drop(old_screen);
         self.draft = None;
         self.confirm_delete = None;
-        self.selected = None;
-        self.query.clear();
-        self.reveal_password = false;
-        self.mode = Mode::Open;
-        self.password.zeroize();
-        self.confirm.zeroize();
         self.error = None;
         self.status = reason.to_string();
         self.import_open = false;
         self.import_result = None;
-        self.hello_pending = None;
         // Секреты из генератора и быстрой вставки не живут в заблокированном окне.
         self.gen_open = false;
         self.gen_result.zeroize();
@@ -639,7 +833,7 @@ impl App {
         // Нажата клавиша быстрого доступа: поток уже запомнил целевое окно
         // и поднял главное окно — открываем палитру поверх.
         if let Some(request) = autotype::take_quick_request() {
-            if self.vault.is_some() {
+            if self.screen.is_main() {
                 self.quick_access = Some(QuickAccess {
                     query: String::new(),
                     cursor: 0,
@@ -665,7 +859,7 @@ impl App {
                 // Заблокировано: запомним запрос и попросим войти — палитра
                 // откроется сама после разблокировки.
                 self.pending_quick = Some(request);
-                self.focus_password = true;
+                self.screen.set_focus_password(true);
                 self.show_main(ctx);
                 self.status =
                     "Быстрый доступ: сначала введите мастер-пароль — палитра откроется сама."
@@ -684,7 +878,7 @@ impl App {
             self.clipboard = None;
         }
 
-        if self.vault.is_some() && self.last_activity.elapsed() >= AUTO_LOCK {
+        if self.screen.is_main() && self.last_activity.elapsed() >= AUTO_LOCK {
             self.lock("Заблокировано по бездействию. Введите мастер-пароль снова.");
         }
 
@@ -701,33 +895,48 @@ impl App {
     pub(crate) fn submit_unlock(&mut self) {
         self.error = None;
         let path = PathBuf::from(self.path.trim());
-        let result = match self.mode {
-            Mode::Open => Vault::open(&path, &self.password),
+        // Значения читаются в локальные переменные, чтобы запись результата
+        // могла заменить весь экран целиком.
+        let (mode, password, confirm) = match &mut self.screen {
+            Screen::Unlock {
+                mode,
+                password,
+                confirm,
+                ..
+            } => (*mode, password.clone(), confirm.clone()),
+            // Уже открыто: повторное нажатие ничего не делает.
+            Screen::Main { .. } => return,
+        };
+        let result = match mode {
+            Mode::Open => Vault::open(&path, &password),
             Mode::Create => {
-                if self.password != self.confirm {
+                if password != confirm {
                     self.error = Some("Пароли не совпадают.".into());
                     return;
                 }
-                Vault::create(&path, &self.password)
+                Vault::create(&path, &password)
             }
         };
 
         match result {
             Ok(vault) => {
                 let first = vault.items_sorted().first().map(|item| item.id);
-                self.status = match self.mode {
+                self.status = match mode {
                     Mode::Open => "Хранилище открыто.".to_string(),
                     Mode::Create => "Хранилище создано.".to_string(),
                 };
                 // Запоминаем файл: при следующем запуске поле уже заполнено.
                 self.path = vault.path().display().to_string();
                 save_settings(&self.settings_snapshot());
-                self.vault = Some(vault);
-                self.selected = first;
-                self.hello_pending = None;
-                self.password.zeroize();
-                self.confirm.zeroize();
-                self.mode = Mode::Open;
+                // Экран входа (с паролями) заменяется экраном работы;
+                // старые строки занулятся при уничтожении структуры.
+                self.screen = Screen::Main {
+                    vault: Some(vault),
+                    selected: first,
+                    query: String::new(),
+                    kind_filter: KindGroup::All,
+                    reveal_password: false,
+                };
                 self.last_activity = Instant::now();
                 self.error = None;
                 // Пока хранилище было закрыто, браузер или палитра могли
@@ -802,10 +1011,10 @@ impl App {
 
     /// Состояние автоввода: закрыто, без выбора или готовая запись.
     pub(crate) fn autotype_state(&self) -> autotype::AutotypeState {
-        let Some(vault) = self.vault.as_ref() else {
+        let Some(vault) = self.screen.vault() else {
             return autotype::AutotypeState::Locked;
         };
-        let Some(item) = self.selected.and_then(|id| vault.get(id)) else {
+        let Some(item) = self.screen.selected().and_then(|id| vault.get(id)) else {
             return autotype::AutotypeState::NoSelection;
         };
         autotype::AutotypeState::Ready(autotype::Credentials {
@@ -817,8 +1026,8 @@ impl App {
 
     /// Название записи, готовой к автовводу (для подсказки в углу).
     pub(crate) fn autotype_title(&self) -> Option<String> {
-        let vault = self.vault.as_ref()?;
-        let item = vault.get(self.selected?)?;
+        let vault = self.screen.vault()?;
+        let item = vault.get(self.screen.selected()?)?;
         Some(item.title.clone())
     }
 
@@ -852,25 +1061,27 @@ impl App {
             ctx.request_repaint();
         });
 
-        self.hello_pending = Some(receiver);
+        self.screen.set_hello_pending(Some(receiver));
         self.error = None;
         self.status = "Ожидание подтверждения Windows Hello…".to_string();
     }
 
     /// Забирает результат фонового входа через Hello.
     pub(crate) fn poll_hello_unlock(&mut self) {
-        let Some(receiver) = &self.hello_pending else {
+        let Some(receiver) = self.screen.take_hello_pending() else {
             return;
         };
         match receiver.try_recv() {
             Ok(Ok(vault)) => {
-                self.hello_pending = None;
                 let first = vault.items_sorted().first().map(|item| item.id);
-                self.vault = Some(vault);
-                self.selected = first;
-                self.password.zeroize();
-                self.confirm.zeroize();
-                self.mode = Mode::Open;
+                // Экран входа заменяется экраном работы.
+                self.screen = Screen::Main {
+                    vault: Some(vault),
+                    selected: first,
+                    query: String::new(),
+                    kind_filter: KindGroup::All,
+                    reveal_password: false,
+                };
                 self.error = None;
                 self.last_activity = Instant::now();
                 self.status = "Хранилище открыто через Windows Hello.".to_string();
@@ -889,13 +1100,12 @@ impl App {
                 }
             }
             Ok(Err(err)) => {
-                self.hello_pending = None;
                 self.error = Some(format!("{err}. Введите мастер-пароль."));
                 self.status = "Вход через Windows Hello не удался.".to_string();
             }
-            Err(TryRecvError::Empty) => {}
+            // Ещё думает: вернуть канал на место и спросить в следующем кадре.
+            Err(TryRecvError::Empty) => self.screen.set_hello_pending(Some(receiver)),
             Err(TryRecvError::Disconnected) => {
-                self.hello_pending = None;
                 self.error = Some(
                     "Поток Windows Hello завершился неожиданно. Введите мастер-пароль.".to_string(),
                 );

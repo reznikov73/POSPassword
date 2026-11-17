@@ -23,30 +23,35 @@ impl App {
                 ui.add_space(8.0);
 
                 ui.label("Мастер-пароль");
+                let mut empty = String::new();
+                let password = self.screen.unlock_password_mut().unwrap_or(&mut empty);
                 let password_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.password)
+                    egui::TextEdit::singleline(password)
                         .password(true)
                         .desired_width(f32::INFINITY),
                 );
                 // Браузер или трей попросили доступ — сразу ставим курсор сюда.
-                if self.focus_password {
+                if self.screen.focus_password() {
                     password_edit.request_focus();
-                    self.focus_password = false;
+                    self.screen.set_focus_password(false);
                 }
 
-                if self.mode == Mode::Create {
+                if self.screen.unlock_mode() == Some(Mode::Create) {
                     ui.add_space(8.0);
                     ui.label("Повторите мастер-пароль");
+                    let mut empty = String::new();
+                    let confirm = self.screen.unlock_confirm_mut().unwrap_or(&mut empty);
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.confirm)
+                        egui::TextEdit::singleline(confirm)
                             .password(true)
                             .desired_width(f32::INFINITY),
                     );
                 }
 
                 ui.add_space(12.0);
+                let mode = self.screen.unlock_mode().unwrap_or(Mode::Open);
                 ui.horizontal(|ui| {
-                    let action = match self.mode {
+                    let action = match mode {
                         Mode::Open => "Открыть",
                         Mode::Create => "Создать хранилище",
                     };
@@ -57,26 +62,32 @@ impl App {
                         self.submit_unlock();
                     }
 
-                    match self.mode {
+                    match mode {
                         Mode::Open => {
                             if ui.button("Создать новый…").clicked() {
-                                self.mode = Mode::Create;
+                                self.screen.set_unlock_mode(Mode::Create);
                                 self.error = None;
-                                self.password.zeroize();
-                                self.confirm.zeroize();
+                                if let Some(password) = self.screen.unlock_password_mut() {
+                                    password.zeroize();
+                                }
+                                if let Some(confirm) = self.screen.unlock_confirm_mut() {
+                                    confirm.zeroize();
+                                }
                             }
                         }
                         Mode::Create => {
                             if ui.button("Назад").clicked() {
-                                self.mode = Mode::Open;
+                                self.screen.set_unlock_mode(Mode::Open);
                                 self.error = None;
-                                self.confirm.zeroize();
+                                if let Some(confirm) = self.screen.unlock_confirm_mut() {
+                                    confirm.zeroize();
+                                }
                             }
                         }
                     }
                 });
 
-                if self.hello_pending.is_some() {
+                if self.screen.hello_pending_is_some() {
                     ui.add_space(8.0);
                     ui.label("Ожидание подтверждения Windows Hello…");
                     ui.ctx().request_repaint_after(Duration::from_millis(200));

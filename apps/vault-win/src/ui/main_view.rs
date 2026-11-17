@@ -5,7 +5,7 @@ use crate::*;
 
 impl App {
     pub(crate) fn main_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(mut vault) = self.vault.take() else {
+        let Some(mut vault) = self.screen.take_vault() else {
             return;
         };
         let mut lock_requested = false;
@@ -19,7 +19,7 @@ impl App {
             && ui
                 .ctx()
                 .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
-            && let Some(id) = self.selected
+            && let Some(id) = self.screen.selected()
             && let Some(item) = vault.get(id)
         {
             let password = item.password.clone();
@@ -159,9 +159,14 @@ impl App {
                 egui::vec2(340.0, ui.available_height()),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    let mut empty_query = String::new();
+                    let query_target = self
+                        .screen
+                        .query_mut()
+                        .unwrap_or(&mut empty_query);
                     ui.horizontal(|ui| {
                         let search = ui.add(
-                            egui::TextEdit::singleline(&mut self.query)
+                            egui::TextEdit::singleline(query_target)
                                 .hint_text("Поиск (Ctrl+F)")
                                 .desired_width(250.0),
                         );
@@ -192,21 +197,27 @@ impl App {
                             let label = format!("{} {count}", group.label());
                             if ui
                                 .selectable_label(
-                                    self.kind_filter == group,
+                                    self.screen.kind_filter() == group,
                                     egui::RichText::new(label).small(),
                                 )
                                 .clicked()
                             {
-                                self.kind_filter = group;
+                                self.screen.set_kind_filter(group);
                             }
                         }
                     });
                     ui.add_space(6.0);
 
+                    let query_text = self
+                        .screen
+                        .query_mut()
+                        .map(|query| query.clone())
+                        .unwrap_or_default();
+                    let kind_filter = self.screen.kind_filter();
                     let items: Vec<(Uuid, String, String, ItemKind, String)> = vault
-                        .search(&self.query)
+                        .search(&query_text)
                         .into_iter()
-                        .filter(|item| self.kind_filter.matches(item.kind))
+                        .filter(|item| kind_filter.matches(item.kind))
                         .map(|i| {
                             (
                                 i.id,
@@ -248,11 +259,11 @@ impl App {
                                     format!("{title}\n{second}")
                                 };
                                 if ui
-                                    .selectable_label(self.selected == Some(*id), label)
+                                    .selectable_label(self.screen.selected() == Some(*id), label)
                                     .clicked()
                                 {
-                                    self.selected = Some(*id);
-                                    self.reveal_password = false;
+                                    self.screen.set_selected(Some(*id));
+                                    self.screen.set_reveal_password(false);
                                 }
                             }
                         });
@@ -262,8 +273,11 @@ impl App {
             ui.separator();
 
             ui.vertical(|ui| {
-                let selected_item: Option<Item> =
-                    self.selected.and_then(|id| vault.get(id)).cloned();
+                let selected_item: Option<Item> = self
+                        .screen
+                        .selected()
+                        .and_then(|id| vault.get(id))
+                        .cloned();
 
                 let Some(item) = selected_item else {
                     ui.add_space(18.0);
@@ -346,19 +360,19 @@ impl App {
                                 if !item.password.is_empty() {
                                     ui.label("Пароль");
                                     ui.horizontal(|ui| {
-                                        let shown = if self.reveal_password {
+                                        let shown = if self.screen.reveal_password() {
                                             item.password.clone()
                                         } else {
                                             "•".repeat(item.password.chars().count().min(24))
                                         };
                                         ui.monospace(shown);
-                                        let toggle = if self.reveal_password {
+                                        let toggle = if self.screen.reveal_password() {
                                             "Скрыть"
                                         } else {
                                             "Показать"
                                         };
                                         if ui.small_button(toggle).clicked() {
-                                            self.reveal_password = !self.reveal_password;
+                                            self.screen.set_reveal_password(!self.screen.reveal_password());
                                         }
                                         if ui.small_button("Копировать").clicked() {
                                             self.copy(&item.password, "Пароль");
@@ -394,20 +408,20 @@ impl App {
                                     }
                                     ui.label(&field.label);
                                     ui.horizontal(|ui| {
-                                        let shown = if field.sensitive && !self.reveal_password {
+                                        let shown = if field.sensitive && !self.screen.reveal_password() {
                                             "•".repeat(field.value.chars().count().min(20))
                                         } else {
                                             field.value.clone()
                                         };
                                         ui.monospace(shown);
                                         if field.sensitive {
-                                            let toggle = if self.reveal_password {
+                                            let toggle = if self.screen.reveal_password() {
                                                 "Скрыть"
                                             } else {
                                                 "Показать"
                                             };
                                             if ui.small_button(toggle).clicked() {
-                                                self.reveal_password = !self.reveal_password;
+                                                self.screen.set_reveal_password(!self.screen.reveal_password());
                                             }
                                         }
                                         if ui.small_button("Копировать").clicked() {
@@ -525,8 +539,8 @@ impl App {
                 match vault.remove(id) {
                     Ok(()) => {
                         self.status = "Запись удалена.".to_string();
-                        if self.selected == Some(id) {
-                            self.selected = None;
+                        if self.screen.selected() == Some(id) {
+                            self.screen.set_selected(None);
                         }
                     }
                     Err(err) => self.status = format!("Не удалось удалить: {err}"),
@@ -667,7 +681,7 @@ impl App {
                 };
                 match result {
                     Ok(()) => {
-                        self.selected = Some(item.id);
+                        self.screen.set_selected(Some(item.id));
                         self.draft = None;
                         self.status = "Сохранено.".to_string();
                     }
@@ -687,7 +701,7 @@ impl App {
         if lock_requested {
             self.lock("Заблокировано.");
         } else {
-            self.vault = Some(vault);
+            self.screen.put_vault(vault);
         }
     }
 }

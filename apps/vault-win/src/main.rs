@@ -170,7 +170,7 @@ impl eframe::App for App {
             self.import_result = None;
             self.status = format!("Файл для импорта: {}", path.display());
         }
-        if self.vault.is_some()
+        if self.screen.is_main()
             && !self.hotkey_capture
             && ui
                 .ctx()
@@ -200,8 +200,10 @@ impl eframe::App for App {
                 self.export_open = false;
             } else if self.audit_open {
                 self.audit_open = false;
-            } else if !self.query.is_empty() {
-                self.query.clear();
+            } else if let Some(query) = self.screen.query_mut()
+                && !query.is_empty()
+            {
+                query.clear();
             }
         }
 
@@ -217,7 +219,7 @@ impl eframe::App for App {
                     .show(ui, |ui| {
                         // Занимаем всю высоту, чтобы строка состояния была внизу окна.
                         ui.set_min_height(ui.available_height());
-                        if self.vault.is_some() {
+                        if self.screen.is_main() {
                             self.main_ui(ui);
                         } else {
                             self.unlock_ui(ui);

@@ -6,7 +6,7 @@ impl App {
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.horizontal(|ui| {
-            if let Some(vault) = &self.vault {
+            if let Some(vault) = self.screen.vault() {
                 ui.label(
                     egui::RichText::new(format!("Записей: {}", vault.items().len()))
                         .small()

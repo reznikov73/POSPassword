@@ -40,9 +40,9 @@ impl App {
         );
         // Заблокировано — не отказываем сразу: поднимаем окно, просим
         // разблокировать и ответим, когда хранилище откроется.
-        if needs_vault && self.vault.is_none() {
+        if needs_vault && self.screen.vault().is_none() {
             self.pending_browser = Some((request, reply));
-            self.focus_password = true;
+            self.screen.set_focus_password(true);
             self.status = "Браузер просит доступ — введите мастер-пароль, запрос ждёт.".to_string();
             return;
         }
@@ -61,7 +61,7 @@ impl App {
                 }
             }
             browser::BrowserRequest::GetLogins { url } => {
-                if self.vault.is_none() {
+                if self.screen.vault().is_none() {
                     let _ = reply.send(browser::error_json(
                         "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
                     ));
@@ -85,7 +85,7 @@ impl App {
                 }
             }
             browser::BrowserRequest::GetCredentials { id, url } => {
-                if self.vault.is_none() {
+                if self.screen.vault().is_none() {
                     let _ = reply.send(browser::error_json(
                         "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
                     ));
@@ -113,14 +113,14 @@ impl App {
                 password,
                 title,
             } => {
-                if self.vault.is_none() {
+                if self.screen.vault().is_none() {
                     let _ = reply.send(browser::error_json(
                         "хранилище заблокировано — введите мастер-пароль в «Хранителе»",
                     ));
                     return;
                 }
                 // Есть ли уже запись этого сайта с тем же логином?
-                let existing = self.vault.as_ref().and_then(|vault| {
+                let existing = self.screen.vault().and_then(|vault| {
                     vault
                         .items()
                         .iter()
@@ -158,7 +158,7 @@ impl App {
 
     /// Список записей для сайта — без паролей.
     pub(crate) fn logins_reply(&mut self, url: &str) -> String {
-        let Some(vault) = self.vault.as_ref() else {
+        let Some(vault) = self.screen.vault() else {
             return browser::error_json("хранилище заблокировано");
         };
         let items: Vec<(Uuid, String, String, String)> = vault
@@ -187,7 +187,7 @@ impl App {
 
     /// Логин и пароль записи — только если запись относится к этому сайту.
     pub(crate) fn credentials_reply(&self, id: Uuid, url: &str) -> String {
-        let Some(vault) = self.vault.as_ref() else {
+        let Some(vault) = self.screen.vault() else {
             return browser::error_json("хранилище заблокировано");
         };
         let Some(item) = vault.get(id) else {
@@ -407,7 +407,7 @@ impl App {
         password: &str,
         title: &str,
     ) -> String {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(vault) = self.screen.vault_mut() else {
             return browser::error_json("хранилище заблокировано");
         };
         let host = Self::site_domain(url);
@@ -442,7 +442,7 @@ impl App {
         password: &str,
         url: &str,
     ) -> String {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(vault) = self.screen.vault_mut() else {
             return browser::error_json("хранилище заблокировано");
         };
         let Some(item) = vault.get(id) else {

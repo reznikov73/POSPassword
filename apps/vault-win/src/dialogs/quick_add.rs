@@ -134,7 +134,7 @@ impl App {
             item.notes = auto_description(&item);
             match vault.add(item.clone()) {
                 Ok(id) => {
-                    self.selected = Some(id);
+                    self.screen.set_selected(Some(id));
                     self.status = format!("Запись «{}» создана.", item.title);
                     self.quick_open = false;
                     self.quick_text.zeroize();

@@ -11,6 +11,10 @@ impl App {
 
         let report = vault.audit();
         let mut open = true;
+        // Выбор записи и признак открытия занимаются по отдельности:
+        // оба живут в замыкании окна.
+        let selected = self.screen.selected_mut();
+        let audit_open = &mut self.audit_open;
 
         egui::Window::new("Аудит хранилища")
             .open(&mut open)
@@ -39,34 +43,36 @@ impl App {
                             );
                             return;
                         }
-                        draw_findings(
-                            ui,
-                            "Сроки действия",
-                            &report.expiring,
-                            &mut self.selected,
-                            &mut self.audit_open,
-                        );
-                        draw_findings(
-                            ui,
-                            "Повторяющиеся пароли",
-                            &report.reused,
-                            &mut self.selected,
-                            &mut self.audit_open,
-                        );
-                        draw_findings(
-                            ui,
-                            "Короткие пароли",
-                            &report.weak,
-                            &mut self.selected,
-                            &mut self.audit_open,
-                        );
-                        draw_findings(
-                            ui,
-                            "Давно не обновлялись",
-                            &report.old,
-                            &mut self.selected,
-                            &mut self.audit_open,
-                        );
+                        if let Some(selected) = selected {
+                            draw_findings(
+                                ui,
+                                "Сроки действия",
+                                &report.expiring,
+                                selected,
+                                audit_open,
+                            );
+                            draw_findings(
+                                ui,
+                                "Повторяющиеся пароли",
+                                &report.reused,
+                                selected,
+                                audit_open,
+                            );
+                            draw_findings(
+                                ui,
+                                "Короткие пароли",
+                                &report.weak,
+                                selected,
+                                audit_open,
+                            );
+                            draw_findings(
+                                ui,
+                                "Давно не обновлялись",
+                                &report.old,
+                                selected,
+                                audit_open,
+                            );
+                        }
                     });
             });
 
