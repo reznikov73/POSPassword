@@ -8,6 +8,7 @@ impl App {
         let Some(mut vault) = self.screen.take_vault() else {
             return;
         };
+        self.poll_hello_enable(&mut vault);
         let mut lock_requested = false;
 
         // Ctrl+C копирует пароль выбранной записи, но только когда ни одно
@@ -84,7 +85,11 @@ impl App {
                 self.import_open = true;
                 self.import_result = None;
             }
-            if ui.button("Экспорт").on_hover_text("Копия в JSON или CSV").clicked() {
+            if ui
+                .button("Экспорт")
+                .on_hover_text("Копия в JSON или CSV")
+                .clicked()
+            {
                 self.export_open = true;
                 self.export_result = None;
                 self.export_password.clear();
@@ -104,7 +109,11 @@ impl App {
                 self.password_confirm.clear();
             }
             let hello_on = sidecar_path(vault.path()).exists();
-            let hello_label = if hello_on { "Hello: вкл" } else { "Hello: выкл" };
+            let hello_label = if hello_on {
+                "Hello: вкл"
+            } else {
+                "Hello: выкл"
+            };
             if ui
                 .button(hello_label)
                 .on_hover_text("Разблокировка без мастер-пароля через Windows Hello")
@@ -119,21 +128,11 @@ impl App {
                             self.status = format!("Не удалось выключить Hello: {err}");
                         }
                     }
-                } else {
-                    let wrapping = generate_wrapping_key();
-                    match hello_win::dpapi_protect(&wrapping) {
-                        Ok(blob) => match vault.enable_hello(&wrapping, &blob) {
-                            Ok(()) => {
-                                self.status = "Вход через Windows Hello включён. При следующем запуске мастер-пароль не понадобится.".to_string();
-                            }
-                            Err(err) => {
-                                self.status = format!("Не удалось включить Hello: {err}");
-                            }
-                        },
-                        Err(err) => {
-                            self.status = format!("Не удалось защитить ключ: {err}");
-                        }
-                    }
+                } else if self.hello_check.is_none() {
+                    // Включение — только после проверки доступности Hello
+                    // в фоновом потоке (Б-7): на машине без Hello кнопка
+                    // сообщает причину и не создаёт сайдкар.
+                    self.start_hello_check();
                 }
             }
             if ui.button(format!("Тема: {}", self.theme.label())).clicked() {

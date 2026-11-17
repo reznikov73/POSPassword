@@ -19,15 +19,26 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
+};
 use windows::Win32::Storage::FileSystem::{
     FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows::core::w;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::core::{PCWSTR, PWSTR, w};
 
 /// Сколько поток ждёт решения пользователя в диалоге, прежде чем ответеть
 /// отказом. Хватает на неторопливое чтение вопроса.
@@ -73,9 +84,14 @@ pub struct BrowserJob {
 pub fn start(ctx: eframe::egui::Context) -> Receiver<BrowserJob> {
     let (jobs, inbox) = channel();
     std::thread::spawn(move || {
+        // DACL канала: полный доступ только текущему пользователю и SYSTEM
+        // (Б-3а). Строится один раз на процесс; при неудаче — атрибуты по
+        // умолчанию (канал всё равно требует диалога и разрешения домена).
+        let security = pipe_security();
         loop {
-            // SAFETY: имя канала — статическая строка, атрибуты не нужны.
-            // При ошибке возвращается невалидный дескриптор, а не Result.
+            // SAFETY: имя канала — статическая строка; дескриптор безопасности
+            // живёт, пока живёт структура `security`. При ошибке возвращается
+            // невалидный дескриптор, а не Result.
             let pipe = unsafe {
                 CreateNamedPipeW(
                     w!(r"\\.\pipe\hranitel-bridge"),
@@ -85,7 +101,7 @@ pub fn start(ctx: eframe::egui::Context) -> Receiver<BrowserJob> {
                     64 * 1024,
                     64 * 1024,
                     0,
-                    None,
+                    security.as_ref().map(|sec| &sec.attributes as *const _),
                 )
             };
             if pipe.is_invalid() {
@@ -99,6 +115,8 @@ pub fn start(ctx: eframe::egui::Context) -> Receiver<BrowserJob> {
                 let _ = unsafe { windows::Win32::Foundation::CloseHandle(pipe) };
                 continue;
             }
+            // PID и образ подключившегося — в лог для разбора инцидентов.
+            log_client(pipe);
             serve_client(pipe, &jobs, &ctx);
             let _ = unsafe { FlushFileBuffers(pipe) };
             let _ = unsafe { DisconnectNamedPipe(pipe) };
@@ -106,6 +124,114 @@ pub fn start(ctx: eframe::egui::Context) -> Receiver<BrowserJob> {
         }
     });
     inbox
+}
+
+/// Атрибуты безопасности канала: дескриптор и структура, которая на него
+/// указывает. Дескриптор освобождается при уничтожении структуры.
+struct PipeSecurity {
+    attributes: SECURITY_ATTRIBUTES,
+    _descriptor: PSECURITY_DESCRIPTOR,
+}
+
+impl Drop for PipeSecurity {
+    fn drop(&mut self) {
+        if !self._descriptor.is_invalid() {
+            // SAFETY: дескриптор создан ConvertStringSecurityDescriptorToSecurityDescriptorW
+            // и больше не используется.
+            unsafe { LocalFree(Some(HLOCAL(self._descriptor.0 as *mut _))) };
+        }
+    }
+}
+
+/// DACL именованного канала: полный доступ только текущему пользователю
+/// и SYSTEM (Б-3а). Пока канал не проверяет, кто подключился, чужая
+/// учётная запись этой машины раньше могла достучаться до диалога.
+fn pipe_security() -> Option<PipeSecurity> {
+    // SAFETY: все вызовы Win32; буферы живут в этой функции.
+    unsafe {
+        // SID текущего пользователя из маркера доступа процесса.
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buffer = vec![0u8; len as usize];
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr() as *mut _),
+            len,
+            &mut len,
+        )
+        .ok()?;
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        let mut sid_text = PWSTR::null();
+        ConvertSidToStringSidW(PSID(user.User.Sid.0), &mut sid_text).ok()?;
+        let sid = sid_text.to_string().ok()?;
+        let _ = LocalFree(Some(HLOCAL(sid_text.as_ptr() as *mut _)));
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+
+        // SDDL: доступ SYSTEM и этому пользователю, больше никому.
+        let sddl: Vec<u16> = format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+        .ok()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: windows::core::BOOL::default(),
+        };
+        Some(PipeSecurity {
+            attributes,
+            _descriptor: descriptor,
+        })
+    }
+}
+
+/// Пишет PID и имя образа подключившегося клиента в лог (Б-3а).
+///
+/// Это диагностика для разбора инцидентов, а не граница защиты: имя образа
+/// подделывается, а легальный путь установки произволен. Настоящие границы —
+/// DACL канала, диалоги разрешений и (в 0.14) общий секрет с расширением.
+fn log_client(pipe: HANDLE) {
+    // SAFETY: дескриптор канала валиден; буферы локальны.
+    unsafe {
+        let mut pid = 0u32;
+        if GetNamedPipeClientProcessId(pipe, &mut pid).is_err() {
+            return;
+        }
+        let image = if pid == 0 {
+            String::new()
+        } else {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                .ok()
+                .and_then(|process| {
+                    let mut buffer = [0u16; 1024];
+                    let mut length = buffer.len() as u32;
+                    QueryFullProcessImageNameW(
+                        process,
+                        PROCESS_NAME_WIN32,
+                        PWSTR(buffer.as_mut_ptr()),
+                        &mut length,
+                    )
+                    .ok()
+                    .map(|_| String::from_utf16_lossy(&buffer[..length as usize]))
+                })
+                .unwrap_or_else(|| format!("pid {pid}, образ неизвестен"))
+        };
+        // TODO(Т-4): заменить на tracing с записью в лог-файл.
+        eprintln!("мост: подключение pid={pid} образ={image}");
+        if !image.contains("browser-host") && !image.is_empty() {
+            eprintln!("мост: внимание — подключился не browser-host: {image}");
+        }
+    }
 }
 
 /// Обслуживает одно подключение: запрос — ответ, пока хост не отключится.

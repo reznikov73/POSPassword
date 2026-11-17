@@ -10,7 +10,9 @@
 use std::ffi::c_void;
 
 use vault_core::KEY_LEN;
-use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
+use windows::Security::Credentials::UI::{
+    UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
+};
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
@@ -83,6 +85,40 @@ pub fn dpapi_unprotect(blob: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, String> 
 
         let _ = LocalFree(Some(HLOCAL(output.pbData as *mut c_void)));
         key
+    }
+}
+
+/// Проверяет, доступен ли Windows Hello на этой машине (Б-7).
+///
+/// Вызывается перед включением опции, чтобы кнопка не обещала того, чего
+/// нет. Блокирующий вызов (WinRT): только из фонового потока, не из UI.
+pub fn check_availability() -> Result<(), String> {
+    // WinRT требует инициализированную квартиру; для рабочего потока — MTA.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+
+    let operation = UserConsentVerifier::CheckAvailabilityAsync()
+        .map_err(|err| format!("Windows Hello: {err}"))?;
+    let availability = operation
+        .join()
+        .map_err(|err| format!("Windows Hello: {err}"))?;
+
+    match availability {
+        UserConsentVerifierAvailability::Available => Ok(()),
+        UserConsentVerifierAvailability::DeviceBusy => {
+            Err("устройство Windows Hello занято".into())
+        }
+        UserConsentVerifierAvailability::DeviceNotPresent => {
+            Err("устройство Windows Hello не найдено".into())
+        }
+        UserConsentVerifierAvailability::DisabledByPolicy => {
+            Err("Windows Hello отключён политикой".into())
+        }
+        UserConsentVerifierAvailability::NotConfiguredForUser => {
+            Err("Windows Hello не настроен для этой учётной записи".into())
+        }
+        _ => Err("Windows Hello недоступен".into()),
     }
 }
 

@@ -92,6 +92,13 @@ pub(crate) fn group_of(kind: ItemKind) -> KindGroup {
     }
 }
 
+impl Drop for Draft {
+    fn drop(&mut self) {
+        // Пароль из диалога правки не живёт в куче после закрытия (Б-4).
+        self.password.zeroize();
+    }
+}
+
 pub(crate) struct Draft {
     pub(crate) id: Option<Uuid>,
     pub(crate) kind: ItemKind,
@@ -461,13 +468,18 @@ pub(crate) struct App {
     pub(crate) confirm_delete: Option<Uuid>,
     pub(crate) status: String,
     pub(crate) error: Option<String>,
-    pub(crate) clipboard: Option<(Instant, String)>,
+    /// Скопированный секрет и момент копирования: значение зануляется
+    /// при уничтожении (Б-4).
+    pub(crate) clipboard: Option<(Instant, Zeroizing<String>)>,
     pub(crate) last_activity: Instant,
     pub(crate) import_open: bool,
     pub(crate) import_path: String,
     pub(crate) import_format: ImportFormat,
     pub(crate) import_result: Option<String>,
     pub(crate) theme: Theme,
+    /// Фоновая проверка доступности Windows Hello перед включением (Б-7);
+    /// результат разбирается в `poll_hello_enable`.
+    pub(crate) hello_check: Option<Receiver<Result<(), String>>>,
     /// Окно встроенной справки, открывается по F1.
     pub(crate) help_open: bool,
     /// Курсор должен прыгнуть в поиск на следующем кадре (Ctrl+F).
@@ -610,6 +622,7 @@ impl App {
             import_format: ImportFormat::Auto,
             import_result: None,
             theme,
+            hello_check: None,
             help_open: false,
             focus_search: false,
             password_open: false,
@@ -771,6 +784,14 @@ impl App {
             ));
         }
         self.pending_quick = None;
+        // Буфер с нашим секретом не ждёт таймаута: чистим сразу при
+        // блокировке (Б-4), но только если там всё ещё наше значение.
+        if let Some((_, secret)) = self.clipboard.take()
+            && let Ok(mut cb) = arboard::Clipboard::new()
+            && cb.get_text().map(|t| t == secret.as_str()).unwrap_or(false)
+        {
+            let _ = cb.set_text(String::new());
+        }
         // Экран работы целиком заменяется экраном входа: хранилище,
         // выбор, поиск и показанные пароли уничтожаются вместе с ним.
         let mut old_screen = std::mem::replace(
@@ -820,7 +841,7 @@ impl App {
         }
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
             Ok(()) => {
-                self.clipboard = Some((Instant::now(), text.to_string()));
+                self.clipboard = Some((Instant::now(), Zeroizing::new(text.to_string())));
                 self.status = format!("{label} скопирован. Буфер очистится через 30 секунд.");
             }
             Err(err) => self.status = format!("Не удалось скопировать: {err}"),
@@ -871,7 +892,7 @@ impl App {
             && at.elapsed() >= CLIPBOARD_TTL
         {
             if let Ok(mut cb) = arboard::Clipboard::new()
-                && cb.get_text().map(|t| t == secret).unwrap_or(false)
+                && cb.get_text().map(|t| t == secret.as_str()).unwrap_or(false)
             {
                 let _ = cb.set_text(String::new());
             }
@@ -1029,6 +1050,47 @@ impl App {
         let vault = self.screen.vault()?;
         let item = vault.get(self.screen.selected()?)?;
         Some(item.title.clone())
+    }
+
+    /// Запускает фоновую проверку доступности Windows Hello (Б-7).
+    /// Результат разбирается `poll_hello_enable` в кадре основного экрана.
+    pub(crate) fn start_hello_check(&mut self) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.hello_check = Some(receiver);
+        self.status = "Проверка Windows Hello…".to_string();
+        std::thread::spawn(move || {
+            let result = hello_win::check_availability();
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Разбирает результат проверки: доступен — включает опцию (создаёт
+    /// сайдкар), недоступен — внятная причина, опция не включается.
+    pub(crate) fn poll_hello_enable(&mut self, vault: &mut Vault) {
+        let Some(receiver) = &self.hello_check else {
+            return;
+        };
+        let outcome = receiver.try_recv();
+        self.hello_check = None;
+        match outcome {
+            Ok(Ok(())) => {
+                let wrapping = generate_wrapping_key();
+                match hello_win::dpapi_protect(&wrapping).and_then(|blob| {
+                    vault
+                        .enable_hello(&wrapping, &blob)
+                        .map_err(|e| e.to_string())
+                }) {
+                    Ok(()) => {
+                        self.status = "Вход через Windows Hello включён. При следующем запуске мастер-пароль не понадобится.".to_string();
+                    }
+                    Err(err) => self.status = format!("Не удалось включить Hello: {err}"),
+                }
+            }
+            Ok(Err(reason)) => {
+                self.status = format!("Windows Hello недоступен: {reason}. Опция не включена.");
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
+        }
     }
 
     /// Сайдкар Windows Hello для выбранного пути, если он существует.
