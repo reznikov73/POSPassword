@@ -15,3 +15,6 @@
 
 # Служебные папки драйвера, появляются сами
 /NVIDIA Corporation/
+# Служебные инструменты песочницы, не часть проекта
+/scripts/split_main.py
+/scripts/stub-bin/
