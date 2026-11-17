@@ -7,9 +7,9 @@
 //!
 //! Сравнение «по базовому домену» (eTLD+1) устроено как у KeePassXC и
 //! Bitwarden: `lk.domclick.ru` и `domclick.ru` — один сайт, а
-//! `github.example.com` для `github.com` — чужой. Полного списка публичных
-//! суффиксов (PSL) в офлайн-программу тащить нельзя, поэтому используется
-//! компактный список двусоставных суффиксов (`co.uk`, `com.ru` и подобные).
+//! `userA.github.io` и `userB.github.io` — разные. Используется полный
+//! список публичных суффиксов (PSL, см. `psl.rs`), встроенный в бинарник;
+//! неизвестные зоны обрабатываются консервативно по неявному правилу «*».
 
 /// Насколько адрес записи похож на то, что видно в заголовке окна.
 /// Сортировка по убыванию: сначала точные совпадения, потом догадки по слову.
@@ -23,33 +23,16 @@ pub enum MatchStrength {
     Strong,
 }
 
-/// Двусоставные публичные суффиксы, для которых базовым доменом считаются
-/// три последние метки (`a.b.co.uk` → `b.co.uk`). Без полного PSL список
-/// покрывает большинство реально встречающихся сайтов; прочие зоны режутся
-/// по простому правилу «две последние метки», как у KeePassXC.
-const SECOND_LEVEL_SUFFIXES: [&str; 49] = [
-    // Великобритания
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "sch.uk", "me.uk",
-    // Россия и СНГ
-    "com.ru", "net.ru", "org.ru", "edu.ru", "gov.ru", "int.ru", "com.ua", "net.ua", "org.ua",
-    "gov.ua", "in.ua", "com.kz", "org.kz", "net.kz", "gov.kz", "edu.kz",
-    // Япония, Корея, Китай
-    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "com.cn", "net.cn", "org.cn",
-    "gov.cn", "edu.cn",
-    // Австралия, Новая Зеландия, Индия
-    "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "co.in", "net.in", "org.in",
-    "gov.in", // Америка
-    "com.br", "com.mx", "com.ar", "co.za",
-];
-
 /// Выделяет хост из адреса или «голого» домена: срезает схему, пользователя,
-/// порт и путь, убирает «www.». Возвращает пустой `None` для мусора.
+/// порт и путь, убирает «www.». Домены с не-ASCII символами (IDN)
+/// переводятся в punycode — омографы с кириллическими буквами не совпадут
+/// с латинскими. Возвращает `None` для мусора.
 ///
 /// ```text
 /// https://lk.domclick.ru/path?x=1  → lk.domclick.ru
 /// www.Mail.RU                     → mail.ru
 /// user:pass@site.ru:8443/x        → site.ru
-/// localhost:8080                  → localhost
+/// пример.испытание.испытание → punycode
 /// ```
 pub fn normalize_host(input: &str) -> Option<String> {
     let mut rest = input.trim().to_lowercase();
@@ -79,14 +62,21 @@ pub fn normalize_host(input: &str) -> Option<String> {
         rest = stripped.to_string();
     }
 
+    // IDN → punycode: кириллический «е» и латинский «e» дают разные
+    // кодировки, омографы перестают совпадать с настоящим сайтом.
+    if !rest.is_ascii() {
+        rest = idna::domain_to_ascii(&rest).ok()?;
+    }
+
     if rest.is_empty() || rest.contains(' ') {
         return None;
     }
     Some(rest)
 }
 
-/// Базовый домен (приближение к eTLD+1): `lk.domclick.ru` → `domclick.ru`,
-/// `a.b.co.uk` → `b.co.uk`, `localhost` и IP-адреса остаются как есть.
+/// Базовый домен (eTLD+1) по полному PSL: `lk.domclick.ru` → `domclick.ru`,
+/// `a.b.co.uk` → `b.co.uk`, `userA.github.io` → целиком (github.io —
+/// публичный суффикс из приватной зоны), `localhost` и IP — как есть.
 pub fn registrable_domain(host: &str) -> String {
     let host = host.trim().to_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
@@ -100,12 +90,12 @@ pub fn registrable_domain(host: &str) -> String {
     {
         return host;
     }
-    let second_level = format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]);
-    if SECOND_LEVEL_SUFFIXES.contains(&second_level.as_str()) {
-        labels[labels.len() - 3..].join(".")
-    } else {
-        labels[labels.len() - 2..].join(".")
+    let suffix_len = crate::psl::public_suffix_len(&labels);
+    if labels.len() <= suffix_len {
+        // Сам хост — публичный суффикс: registrable нет, возвращаем как есть.
+        return host;
     }
+    labels[labels.len() - suffix_len - 1..].join(".")
 }
 
 /// Одинаков ли сайт у двух адресов: точно тот же хост или тот же базовый домен.
@@ -186,6 +176,39 @@ mod tests {
         assert!(url_matches("https://lk.domclick.ru/login", "domclick.ru"));
         assert!(url_matches("www.github.com", "https://github.com/features"));
         assert!(url_matches("https://mail.ru", "https://mail.ru:443/inbox"));
+    }
+
+    #[test]
+    fn psl_two_part_suffixes_split_strangers() {
+        // bank.co.il ≠ evil.co.il: co.il — публичный суффикс.
+        assert!(!url_matches("https://bank.co.il", "https://evil.co.il"));
+        // userA.github.io ≠ userB.github.io: github.io — приватная зона PSL.
+        assert!(!url_matches(
+            "https://usera.github.io",
+            "https://userb.github.io"
+        ));
+        // Поддомен своей страницы — тот же сайт (a.user.github.io = user.github.io),
+        // а сам github.io — публичный суффикс, чужих страниц он не покрывает.
+        assert!(url_matches(
+            "https://a.user.github.io",
+            "https://user.github.io"
+        ));
+        assert!(!url_matches("https://github.io", "https://user.github.io"));
+    }
+
+    #[test]
+    fn idn_domains_become_punycode() {
+        let host = normalize_host("https://пример.испытание.рф/вход");
+        assert!(host.is_some());
+        assert!(host.as_deref().unwrap_or("").starts_with("xn--"));
+        assert_eq!(normalize_host("mail.ru").as_deref(), Some("mail.ru"));
+    }
+
+    #[test]
+    fn cyrillic_homoglyph_is_not_the_same_site() {
+        // Кириллическая «е» в домене не совпадает с латинской: punycode разный.
+        let homoglyph = "https://sbеrbank.ru";
+        assert!(!url_matches("https://sberbank.ru", homoglyph));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod hello;
 mod import;
 mod model;
 mod passphrase;
+mod psl;
 mod quickadd;
 mod sites;
 mod totp;
