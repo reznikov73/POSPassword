@@ -1,0 +1,4 @@
+#!/bin/sh
+# Локальная защита: в коммит не должен попасть файл хранилища «Хранителя».
+# Включается один раз: git config core.hooksPath .githooks
+pwsh -NoProfile -File scripts/check-vault-files.ps1 || exit 1

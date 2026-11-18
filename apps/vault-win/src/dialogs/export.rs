@@ -103,29 +103,72 @@ impl App {
                 self.export_result = Some("Укажите путь к файлу.".to_string());
                 return;
             }
-            match Vault::open(vault.path(), &self.export_password) {
-                Err(_) => self.export_result = Some("Мастер-пароль неверен.".to_string()),
-                Ok(probe) => {
-                    drop(probe);
-                    match vault.export(self.export_format) {
-                        Ok(text) => match std::fs::write(&path, text) {
-                            Ok(()) => {
-                                let count = vault.items().len();
-                                self.status = format!("Экспортировано записей: {count}.");
-                                self.export_result = Some(format!(
-                                    "Сохранено записей: {count}. Файл содержит открытые пароли — удалите его после переноса."
-                                ));
-                                self.export_password.zeroize();
-                            }
-                            Err(err) => {
-                                self.export_result =
-                                    Some(format!("Не удалось записать файл: {err}"));
-                            }
-                        },
-                        Err(err) => self.export_result = Some(format!("Ошибка экспорта: {err}")),
+            // Пароль сверяется с ключом уже открытого хранилища: повторное
+            // `Vault::open` упёрлось бы в нашу же блокировку файла (Ф-6),
+            // и верный пароль выглядел бы как неверный.
+            if !export_password_ok(vault, &self.export_password) {
+                self.export_result = Some("Мастер-пароль неверен.".to_string());
+                return;
+            }
+            match vault.export(self.export_format) {
+                Ok(text) => match std::fs::write(&path, text) {
+                    Ok(()) => {
+                        let count = vault.items().len();
+                        self.status = format!("Экспортировано записей: {count}.");
+                        self.export_result = Some(format!(
+                            "Сохранено записей: {count}. Файл содержит открытые пароли — удалите его после переноса."
+                        ));
+                        self.export_password.zeroize();
                     }
-                }
+                    Err(err) => {
+                        self.export_result = Some(format!("Не удалось записать файл: {err}"));
+                    }
+                },
+                Err(err) => self.export_result = Some(format!("Ошибка экспорта: {err}")),
             }
         }
+    }
+}
+
+/// Проверяет мастер-пароль открытого хранилища перед экспортом (Ф-5).
+///
+/// Открывать файл повторно нельзя: он уже под нашей эксклюзивной
+/// блокировкой (Ф-6), и `Vault::open` вернёт «занято» даже на верный
+/// пароль. Поэтому сверяем выведенный ключ напрямую — тот же приём, что
+/// в диалоге смены мастер-пароля.
+pub(crate) fn export_password_ok(vault: &Vault, password: &str) -> bool {
+    vault.verify_password(password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_password_is_checked_against_open_vault() {
+        let dir = tempfile::tempdir().expect("каталог");
+        let path = dir.path().join("v.opvault");
+        let vault = Vault::create(&path, "master-password-1").expect("создание");
+
+        assert!(export_password_ok(&vault, "master-password-1"));
+        assert!(!export_password_ok(&vault, "wrong-password-1"));
+    }
+
+    /// Регрессия Ф-5/Ф-6: повторное открытие своего же файла всегда «занято»,
+    /// поэтому экспорт обязан проверять пароль через `verify_password`.
+    #[test]
+    fn reopening_own_vault_is_busy_but_verify_works() {
+        let dir = tempfile::tempdir().expect("каталог");
+        let path = dir.path().join("v.opvault");
+        let vault = Vault::create(&path, "master-password-1").expect("создание");
+
+        assert!(
+            Vault::open(&path, "master-password-1").is_err(),
+            "файл под нашей блокировкой — повторное открытие должно падать"
+        );
+        assert!(
+            export_password_ok(&vault, "master-password-1"),
+            "экспорт должен принимать верный пароль открытого хранилища"
+        );
     }
 }

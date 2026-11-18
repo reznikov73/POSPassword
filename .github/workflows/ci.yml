@@ -21,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Проверка, что в репозитории нет файлов хранилища
+        shell: pwsh
+        run: pwsh -File scripts/check-vault-files.ps1
+
       - name: Установить Rust
         uses: dtolnay/rust-toolchain@stable
         with:
